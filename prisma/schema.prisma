@@ -1,0 +1,1564 @@
+// Link Local — Prisma schema
+// Translated from DBML v6. PostgreSQL.
+// Convention: PascalCase models / camelCase fields in Prisma, mapped to
+// snake_case tables/columns in the database via @@map / @map.
+// Enum-like columns are kept as String to mirror the DBML's flexible varchars;
+// allowed values are documented in comments next to each field.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP A — ADMIN MASTER TABLES
+// ─────────────────────────────────────────────────────────────
+
+model City {
+  id        Int      @id @default(autoincrement())
+  name      String
+  state     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  areas             Area[]
+  referralPoints    CityReferralPoint[]
+  allowedDocTypes   CityAllowedDocType[]
+  addressVerifyDocs AddressVerificationDoc[]
+  cityMemberships   UserCityMembership[]
+  referrals         Referral[]
+  addressFields     CityAddressField[]
+
+  @@map("cities")
+}
+
+/// Per-city address-capture form configuration (PRD: "the format of the address
+/// capture form will be different for different cities and set up at ADMIN level").
+model CityAddressField {
+  id         Int     @id @default(autoincrement())
+  cityId     Int     @map("city_id")
+  fieldKey   String  @map("field_key") // flat_wing | building | lane1 | lane2 | area | suburb | pincode | landmark | sector | district
+  label      String
+  isRequired Boolean @default(false) @map("is_required")
+  isVisible  Boolean @default(true) @map("is_visible")
+  sortOrder  Int     @default(0) @map("sort_order")
+
+  city City @relation(fields: [cityId], references: [id])
+
+  @@unique([cityId, fieldKey])
+  @@map("city_address_fields")
+}
+
+model Area {
+  id       Int     @id @default(autoincrement())
+  cityId   Int     @map("city_id")
+  pincode  String?
+  suburb   String?
+  areaName String  @map("area_name")
+  isActive Boolean @default(true) @map("is_active")
+
+  city      City      @relation(fields: [cityId], references: [id])
+  addresses Address[]
+
+  @@map("areas")
+}
+
+model ServiceCategory {
+  id        Int      @id @default(autoincrement())
+  name      String
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  subcategories ServiceSubcategory[]
+
+  @@map("service_categories")
+}
+
+model ServiceSubcategory {
+  id         Int     @id @default(autoincrement())
+  categoryId Int     @map("category_id")
+  name       String
+  isActive   Boolean @default(true) @map("is_active")
+
+  category     ServiceCategory           @relation(fields: [categoryId], references: [id])
+  fields       ServiceSubcategoryField[]
+  serviceTypes ProfileServiceType[]
+
+  @@map("service_subcategories")
+}
+
+/// Admin-configured dynamic profile fields per service subcategory.
+model ServiceSubcategoryField {
+  id            Int     @id @default(autoincrement())
+  subcategoryId Int     @map("subcategory_id")
+  fieldName     String  @map("field_name")
+  fieldType     String  @map("field_type") // text | number | date | dropdown | boolean
+  fieldOptions  String? @map("field_options") // JSON array of options if field_type = dropdown
+  isRequired    Boolean @default(false) @map("is_required")
+  sortOrder     Int     @default(0) @map("sort_order")
+  isActive      Boolean @default(true) @map("is_active")
+
+  subcategory  ServiceSubcategory     @relation(fields: [subcategoryId], references: [id])
+  customValues SpProfileCustomField[]
+
+  @@map("service_subcategory_fields")
+}
+
+/// SP values for dynamic subcategory fields.
+model SpProfileCustomField {
+  id         Int    @id @default(autoincrement())
+  profileId  Int    @map("profile_id")
+  fieldId    Int    @map("field_id")
+  fieldValue String @map("field_value")
+
+  profile Profile                 @relation(fields: [profileId], references: [id])
+  field   ServiceSubcategoryField @relation(fields: [fieldId], references: [id])
+
+  @@map("sp_profile_custom_fields")
+}
+
+model EducationMaster {
+  id              Int     @id @default(autoincrement())
+  degree          String?
+  schoolName      String? @map("school_name")
+  schoolCity      String? @map("school_city")
+  collegeName     String? @map("college_name")
+  collegeCity     String? @map("college_city")
+  postGradCollege String? @map("post_grad_college")
+  postGradCity    String? @map("post_grad_city")
+
+  profileEducations ProfileEducation[]
+
+  @@map("education_master")
+}
+
+model ProfessionMaster {
+  id       Int    @id @default(autoincrement())
+  category String // Salaried | Business | Freelancer | Consultant | Student | Retired | Advisor | On-Contract
+
+  profileProfessions ProfileProfession[]
+
+  @@map("profession_master")
+}
+
+/// Admin-controlled hobbies list.
+model HobbiesMaster {
+  id       Int     @id @default(autoincrement())
+  name     String  @unique
+  isActive Boolean @default(true) @map("is_active")
+
+  profileHobbies ProfileHobby[]
+
+  @@map("hobbies_master")
+}
+
+model CouponCode {
+  id            Int       @id @default(autoincrement())
+  code          String    @unique
+  discountType  String    @map("discount_type") // amount_off | percent_off
+  discountValue Decimal   @map("discount_value") @db.Decimal(10, 2)
+  validityFrom  DateTime? @map("validity_from") @db.Date
+  validityTo    DateTime? @map("validity_to") @db.Date
+  maxUses       Int?      @map("max_uses")
+  usedCount     Int       @default(0) @map("used_count")
+  isActive      Boolean   @default(true) @map("is_active")
+  createdBy     Int?      @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  creator               Admin?                 @relation(fields: [createdBy], references: [id])
+  usageLogs             CouponUsageLog[]
+  profilesMarketing     Profile[]
+  events                Event[]
+  eventPayments         EventPayment[]
+  interestGroups        InterestGroup[]
+  interestGroupPayments InterestGroupPayment[]
+  orders                Order[]
+
+  @@map("coupon_codes")
+}
+
+/// Tracks WHO used each coupon and WHEN.
+model CouponUsageLog {
+  id         Int      @id @default(autoincrement())
+  couponId   Int      @map("coupon_id")
+  userId     Int      @map("user_id")
+  entityType String   @map("entity_type") // event | group | order
+  entityId   Int      @map("entity_id")
+  usedAt     DateTime @default(now()) @map("used_at")
+
+  coupon CouponCode @relation(fields: [couponId], references: [id])
+  user   User       @relation(fields: [userId], references: [id])
+
+  @@map("coupon_usage_log")
+}
+
+model ProfileTag {
+  id      Int    @id @default(autoincrement())
+  tagName String @unique @map("tag_name")
+
+  tagsMap ProfileTagMap[]
+
+  @@map("profile_tags")
+}
+
+model ReferralSource {
+  id     Int     @id @default(autoincrement())
+  source String // user_id | event_id | social_media | friends_family | print_media | neighbourhood_poster | other
+  label  String?
+
+  users     User[]
+  referrals Referral[]
+
+  @@map("referral_sources")
+}
+
+model Freebie {
+  id             Int      @id @default(autoincrement())
+  name           String
+  description    String?
+  pointsRequired Int      @map("points_required")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  referrals Referral[]
+
+  @@map("freebies")
+}
+
+model CityReferralPoint {
+  id                 Int       @id @default(autoincrement())
+  cityId             Int       @map("city_id")
+  pointsPerReferral  Int       @map("points_per_referral")
+  bonusPointsNewCity Int       @default(0) @map("bonus_points_new_city")
+  isActive           Boolean   @default(true) @map("is_active")
+  effectiveFrom      DateTime? @map("effective_from") @db.Date
+  createdBy          Int?      @map("created_by")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  city    City   @relation(fields: [cityId], references: [id])
+  creator Admin? @relation(fields: [createdBy], references: [id])
+
+  @@map("city_referral_points")
+}
+
+model CityAllowedDocType {
+  id       Int     @id @default(autoincrement())
+  cityId   Int     @map("city_id")
+  docType  String  @map("doc_type") // rental_agreement | utility_bill | govt_id | bank_statement | employment_letter | other
+  isActive Boolean @default(true) @map("is_active")
+
+  city City @relation(fields: [cityId], references: [id])
+
+  @@map("city_allowed_doc_types")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP B — AUTH & USERS
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id               Int      @id @default(autoincrement())
+  mobile           String?  @unique @db.VarChar(15)
+  email            String?  @unique
+  passwordHash     String?  @map("password_hash")
+  authType         String   @map("auth_type") // otp | password
+  userType         String   @map("user_type") // resident | service_provider | business_listing
+  referralCode     String?  @unique @map("referral_code")
+  referredBy       Int?     @map("referred_by")
+  referralSourceId Int?     @map("referral_source_id")
+  isVerified       Boolean  @default(false) @map("is_verified")
+  isActive         Boolean  @default(true) @map("is_active")
+  isBlocked        Boolean  @default(false) @map("is_blocked")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  referrer       User?           @relation("UserReferrals", fields: [referredBy], references: [id])
+  referredUsers  User[]          @relation("UserReferrals")
+  referralSource ReferralSource? @relation(fields: [referralSourceId], references: [id])
+
+  couponUsageLogs       CouponUsageLog[]
+  blocksInitiated       BlockedUser[]                    @relation("UserBlocker")
+  blocksReceived        BlockedUser[]                    @relation("UserBlocked")
+  otpTokens             OtpToken[]
+  devices               UserDevice[]
+  visibilityCircles     VisibilityCircle[]
+  circleMemberships     VisibilityCircleMember[]
+  cityMemberships       UserCityMembership[]
+  profile               Profile?
+  familyEntries         ProfileFamily[]
+  scheduleSlotsBooked   SpScheduleSlot[]                 @relation("SlotBookedBy")
+  posts                 Post[]
+  postLikes             PostLike[]
+  postComments          PostComment[]
+  postCommentReactions  PostCommentReaction[]
+  postShares            PostShare[]
+  postReposts           PostRepost[]
+  feedRemovalRequests   FeedRemovalRequest[]
+  entityShares          EntityShare[]
+  abuseReportsMade      AbuseReport[]                    @relation("AbuseReporter")
+  abuseReportsAgainst   AbuseReport[]                    @relation("AbuseReportedUser")
+  eventsCreated         Event[]                          @relation("EventCreator")
+  eventsCloned          Event[]                          @relation("EventCloner")
+  eventAttendees        EventAttendee[]
+  eventRatings          EventRating[]
+  eventPayments         EventPayment[]
+  eventInvites          EventInvitedUser[]
+  eventDeletionRequests EventDeletionRequest[]
+  groupsCreated         InterestGroup[]
+  groupAdmins           InterestGroupAdmin[]
+  groupMembers          InterestGroupMember[]
+  groupPayments         InterestGroupPayment[]
+  groupRatings          InterestGroupRating[]
+  groupInvites          InterestGroupInvitedUser[]
+  groupTransfersFrom    InterestGroupOwnershipTransfer[] @relation("TransferFrom")
+  groupTransfersTo      InterestGroupOwnershipTransfer[] @relation("TransferTo")
+  groupTransfersInit    InterestGroupOwnershipTransfer[] @relation("TransferInitiator")
+  referralsMade         Referral[]                       @relation("ReferralReferrer")
+  referralsReceived     Referral[]                       @relation("ReferralReferred")
+  referralDailyCaps     ReferralDailyCap[]
+  messagesSent          Message[]                        @relation("MessageSender")
+  messagesReceived      Message[]                        @relation("MessageReceiver")
+  ratingsGiven          ServiceProviderRating[]
+  searchLogs            SearchLog[]
+  profileVerifications  ProfileVerification[]
+  whitelistEntries      WhitelistedBlacklistedUser[]
+  adminEmailsReceived   AdminEmail[]
+  orders                Order[]
+  refundRequests        RefundRequest[]
+  notifications         Notification[]
+  stats                 UserStats?
+
+  @@map("users")
+}
+
+model Admin {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      String? // super_admin | ops_admin
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  couponsCreated         CouponCode[]
+  cityReferralPoints     CityReferralPoint[]
+  addressDocsReviewed    AddressVerificationDoc[]
+  profileTagsAssigned    ProfileTagMap[]
+  eventDeletionsReviewed EventDeletionRequest[]
+  profileVerifications   ProfileVerification[]
+  whitelistSet           WhitelistedBlacklistedUser[]
+  emails                 AdminEmail[]
+  auditLogs              AdminAuditLog[]
+  abuseReportsReviewed   AbuseReport[]
+  refundRequestsReviewed RefundRequest[]
+
+  @@map("admins")
+}
+
+model BlockedUser {
+  id         Int      @id @default(autoincrement())
+  blockerId  Int      @map("blocker_id")
+  blockedId  Int      @map("blocked_id")
+  reason     String?
+  blockScope String   @default("full") @map("block_scope") // full | messaging | contact_details | posts | events | groups
+  blockedAt  DateTime @default(now()) @map("blocked_at")
+
+  blocker User @relation("UserBlocker", fields: [blockerId], references: [id])
+  blocked User @relation("UserBlocked", fields: [blockedId], references: [id])
+
+  @@map("blocked_users")
+}
+
+/// Stores OTPs for mobile/email verification.
+model OtpToken {
+  id        Int      @id @default(autoincrement())
+  userId    Int?     @map("user_id")
+  mobile    String?  @db.VarChar(15)
+  email     String?
+  otpCode   String   @map("otp_code")
+  purpose   String // login | registration | password_reset
+  isUsed    Boolean  @default(false) @map("is_used")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("otp_tokens")
+}
+
+/// Push notification tokens and active session tracking.
+model UserDevice {
+  id           Int       @id @default(autoincrement())
+  userId       Int       @map("user_id")
+  deviceType   String    @map("device_type") // ios | android | web
+  deviceToken  String?   @map("device_token")
+  deviceName   String?   @map("device_name")
+  lastActiveAt DateTime? @map("last_active_at")
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("user_devices")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP C — ADDRESS SYSTEM & VISIBILITY CIRCLES
+// ─────────────────────────────────────────────────────────────
+
+model Address {
+  id          Int      @id @default(autoincrement())
+  areaId      Int      @map("area_id")
+  flatWing    String?  @map("flat_wing")
+  apartment   String?
+  lane1       String?
+  lane2       String?
+  fullAddress String?  @map("full_address")
+  latitude    Decimal? @db.Decimal(10, 7)
+  longitude   Decimal? @db.Decimal(10, 7)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  area              Area                     @relation(fields: [areaId], references: [id])
+  verificationDocs  AddressVerificationDoc[]
+  profiles          Profile[]
+  pickupPreferences SpDeliveryPreference[]
+  orders            Order[]
+
+  @@map("addresses")
+}
+
+model AddressVerificationDoc {
+  id         Int       @id @default(autoincrement())
+  addressId  Int       @map("address_id")
+  cityId     Int       @map("city_id")
+  docType    String    @map("doc_type")
+  docUrl     String    @map("doc_url")
+  status     String? // pending | approved | rejected
+  reviewedBy Int?      @map("reviewed_by")
+  reviewedAt DateTime? @map("reviewed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  address  Address @relation(fields: [addressId], references: [id])
+  city     City    @relation(fields: [cityId], references: [id])
+  reviewer Admin?  @relation(fields: [reviewedBy], references: [id])
+
+  @@map("address_verification_docs")
+}
+
+model VisibilityCircle {
+  id        Int      @id @default(autoincrement())
+  userId    Int?     @map("user_id")
+  name      String
+  scope     String? // apartment | lane | area | city
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user           User?                    @relation(fields: [userId], references: [id])
+  members        VisibilityCircleMember[]
+  profilesUsing  Profile[]
+  contactDetails ProfileContactDetail[]
+  posts          Post[]
+  events         Event[]
+  interestGroups InterestGroup[]
+
+  @@map("visibility_circles")
+}
+
+model VisibilityCircleMember {
+  id       Int      @id @default(autoincrement())
+  circleId Int      @map("circle_id")
+  userId   Int      @map("user_id")
+  addedAt  DateTime @default(now()) @map("added_at")
+
+  circle VisibilityCircle @relation(fields: [circleId], references: [id])
+  user   User             @relation(fields: [userId], references: [id])
+
+  @@map("visibility_circle_members")
+}
+
+/// Supports border residents belonging to multiple cities.
+model UserCityMembership {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  cityId    Int      @map("city_id")
+  isPrimary Boolean  @default(false) @map("is_primary")
+  joinedAt  DateTime @default(now()) @map("joined_at")
+
+  user User @relation(fields: [userId], references: [id])
+  city City @relation(fields: [cityId], references: [id])
+
+  @@unique([userId, cityId])
+  @@map("user_city_memberships")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP D — UNIFIED PROFILES
+// ─────────────────────────────────────────────────────────────
+
+model Profile {
+  id                      Int       @id @default(autoincrement())
+  userId                  Int       @unique @map("user_id")
+  name                    String
+  photoUrl                String?   @map("photo_url")
+  dateOfBirth             DateTime? @map("date_of_birth") @db.Date
+  gender                  String? // male | female | do_not_disclose
+  aboutMe                 String?   @map("about_me")
+  addressId               Int?      @map("address_id")
+  ownershipType           String?   @map("ownership_type") // owned | rented
+  residingSince           DateTime? @map("residing_since") @db.Date
+  canOfferHelpWith        String?   @map("can_offer_help_with")
+  socialMediaShareEnabled Boolean   @default(false) @map("social_media_share_enabled")
+  visibilityCircleId      Int?      @map("visibility_circle_id")
+  yearsOfExperience       Int?      @map("years_of_experience")
+  marketingCouponId       Int?      @map("marketing_coupon_id")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  user             User                       @relation(fields: [userId], references: [id])
+  address          Address?                   @relation(fields: [addressId], references: [id])
+  visibilityCircle VisibilityCircle?          @relation(fields: [visibilityCircleId], references: [id])
+  marketingCoupon  CouponCode?                @relation(fields: [marketingCouponId], references: [id])
+  customFields     SpProfileCustomField[]
+  completion       ProfileCompletionTracking?
+  privacy          ProfilePrivacySetting?
+  educations       ProfileEducation[]
+  hobbies          ProfileHobby[]
+  professions      ProfileProfession[]
+  contactDetails   ProfileContactDetail[]
+  tagsMap          ProfileTagMap[]
+  pets             ProfilePet[]
+  family           ProfileFamily[]
+  serviceTypes     ProfileServiceType[]
+  media            ProfileMedia[]
+  products         SpProduct[]
+  delivery         SpDeliveryPreference?
+  unavailability   SpUnavailability[]
+  paymentMethods   SpPaymentMethod[]
+  paymentTerms     SpPaymentTerm?
+  scheduleSlots    SpScheduleSlot[]
+  ratings          ServiceProviderRating[]
+  orders           Order[]
+
+  @@map("profiles")
+}
+
+/// Admin dashboard: new-member profile completion tracking.
+model ProfileCompletionTracking {
+  id                 Int       @id @default(autoincrement())
+  profileId          Int       @unique @map("profile_id")
+  hasPhoto           Boolean   @default(false) @map("has_photo")
+  hasAddress         Boolean   @default(false) @map("has_address")
+  hasAddressVerified Boolean   @default(false) @map("has_address_verified")
+  hasEducation       Boolean   @default(false) @map("has_education")
+  hasProfession      Boolean   @default(false) @map("has_profession")
+  hasContactDetails  Boolean   @default(false) @map("has_contact_details")
+  hasServiceTypes    Boolean   @default(false) @map("has_service_types")
+  hasProducts        Boolean   @default(false) @map("has_products")
+  hasDeliveryPrefs   Boolean   @default(false) @map("has_delivery_prefs")
+  hasPaymentMethods  Boolean   @default(false) @map("has_payment_methods")
+  completionPercent  Int       @default(0) @map("completion_percent")
+  lastComputedAt     DateTime? @map("last_computed_at")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("profile_completion_tracking")
+}
+
+/// Per-field visibility settings. Each *_circle_id references visibility_circles.id;
+/// kept as scalar columns (enforced in app logic) to avoid 11 bidirectional relations.
+model ProfilePrivacySetting {
+  id                           Int  @id @default(autoincrement())
+  profileId                    Int  @unique @map("profile_id")
+  profileVisibilityCircleId    Int? @map("profile_visibility_circle_id")
+  searchVisibilityCircleId     Int? @map("search_visibility_circle_id")
+  nameVisibilityCircleId       Int? @map("name_visibility_circle_id")
+  ageVisibilityCircleId        Int? @map("age_visibility_circle_id")
+  genderVisibilityCircleId     Int? @map("gender_visibility_circle_id")
+  addressVisibilityCircleId    Int? @map("address_visibility_circle_id")
+  educationVisibilityCircleId  Int? @map("education_visibility_circle_id")
+  professionVisibilityCircleId Int? @map("profession_visibility_circle_id")
+  contactVisibilityCircleId    Int? @map("contact_visibility_circle_id")
+  messagingAccessCircleId      Int? @map("messaging_access_circle_id")
+  ratingsVisibilityCircleId    Int? @map("ratings_visibility_circle_id")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("profile_privacy_settings")
+}
+
+model ProfileEducation {
+  id                Int  @id @default(autoincrement())
+  profileId         Int  @map("profile_id")
+  educationMasterId Int? @map("education_master_id")
+
+  profile         Profile          @relation(fields: [profileId], references: [id])
+  educationMaster EducationMaster? @relation(fields: [educationMasterId], references: [id])
+
+  @@map("profile_education")
+}
+
+model ProfileHobby {
+  id            Int     @id @default(autoincrement())
+  profileId     Int     @map("profile_id")
+  hobbyMasterId Int?    @map("hobby_master_id")
+  customHobby   String? @map("custom_hobby")
+
+  profile     Profile        @relation(fields: [profileId], references: [id])
+  hobbyMaster HobbiesMaster? @relation(fields: [hobbyMasterId], references: [id])
+
+  @@map("profile_hobbies")
+}
+
+model ProfileProfession {
+  id                 Int     @id @default(autoincrement())
+  profileId          Int     @map("profile_id")
+  professionMasterId Int?    @map("profession_master_id")
+  companyOrDetail    String? @map("company_or_detail")
+
+  profile          Profile           @relation(fields: [profileId], references: [id])
+  professionMaster ProfessionMaster? @relation(fields: [professionMasterId], references: [id])
+
+  @@map("profile_professions")
+}
+
+model ProfileContactDetail {
+  id                 Int    @id @default(autoincrement())
+  profileId          Int    @map("profile_id")
+  contactType        String @map("contact_type") // phone | whatsapp | email | other
+  value              String
+  visibilityCircleId Int?   @map("visibility_circle_id")
+
+  profile          Profile           @relation(fields: [profileId], references: [id])
+  visibilityCircle VisibilityCircle? @relation(fields: [visibilityCircleId], references: [id])
+
+  @@map("profile_contact_details")
+}
+
+model ProfileTagMap {
+  id         Int      @id @default(autoincrement())
+  profileId  Int      @map("profile_id")
+  tagId      Int      @map("tag_id")
+  assignedBy Int?     @map("assigned_by")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  profile  Profile    @relation(fields: [profileId], references: [id])
+  tag      ProfileTag @relation(fields: [tagId], references: [id])
+  assigner Admin?     @relation(fields: [assignedBy], references: [id])
+
+  @@map("profile_tags_map")
+}
+
+model ProfilePet {
+  id        Int     @id @default(autoincrement())
+  profileId Int     @map("profile_id")
+  name      String?
+  type      String?
+  breed     String?
+  photoUrl  String? @map("photo_url")
+  videoUrl  String? @map("video_url")
+  age       Int?
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("profile_pets")
+}
+
+model ProfileFamily {
+  id            Int     @id @default(autoincrement())
+  profileId     Int     @map("profile_id")
+  relation      String // grandfather | grandmother | father | mother | spouse | child_1 ...
+  relatedUserId Int?    @map("related_user_id")
+  name          String?
+
+  profile     Profile @relation(fields: [profileId], references: [id])
+  relatedUser User?   @relation(fields: [relatedUserId], references: [id])
+
+  @@map("profile_family")
+}
+
+model ProfileServiceType {
+  id            Int     @id @default(autoincrement())
+  profileId     Int     @map("profile_id")
+  subcategoryId Int     @map("subcategory_id")
+  serviceNature String  @map("service_nature") // one_time | recurring
+  frequency     String? // daily | weekly | monthly | custom
+
+  profile     Profile            @relation(fields: [profileId], references: [id])
+  subcategory ServiceSubcategory @relation(fields: [subcategoryId], references: [id])
+
+  @@map("profile_service_types")
+}
+
+model ProfileMedia {
+  id        Int      @id @default(autoincrement())
+  profileId Int      @map("profile_id")
+  mediaType String   @map("media_type") // photo | video | menu_card | services_card
+  url       String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("profile_media")
+}
+
+model SpProduct {
+  id                 Int      @id @default(autoincrement())
+  profileId          Int      @map("profile_id")
+  name               String
+  description        String?
+  price              Decimal? @db.Decimal(10, 2)
+  unit               String?
+  quantity           Decimal? @db.Decimal(10, 3)
+  quantityMetric     String?  @map("quantity_metric")
+  customizationNotes String?  @map("customization_notes")
+  photoUrl           String?  @map("photo_url")
+  category           String?
+  isAvailable        Boolean  @default(true) @map("is_available")
+  sortOrder          Int      @default(0) @map("sort_order")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  profile    Profile     @relation(fields: [profileId], references: [id])
+  orderItems OrderItem[]
+
+  @@map("sp_products")
+}
+
+model SpDeliveryPreference {
+  id                  Int      @id @default(autoincrement())
+  profileId           Int      @unique @map("profile_id")
+  deliveryTimingType  String?  @map("delivery_timing_type") // after_24h | after_48h | after_confirmation
+  offersHomeDelivery  Boolean  @default(false) @map("offers_home_delivery")
+  deliveryRadiusKm    Decimal? @map("delivery_radius_km") @db.Decimal(5, 2)
+  minOrderAmount      Decimal? @map("min_order_amount") @db.Decimal(10, 2)
+  deliveryCharge      Decimal? @map("delivery_charge") @db.Decimal(10, 2)
+  deliveryTimeMinutes Int?     @map("delivery_time_minutes")
+  offersPickup        Boolean  @default(false) @map("offers_pickup")
+  pickupAddressId     Int?     @map("pickup_address_id")
+  deliveryNotes       String?  @map("delivery_notes")
+
+  profile       Profile  @relation(fields: [profileId], references: [id])
+  pickupAddress Address? @relation(fields: [pickupAddressId], references: [id])
+
+  @@map("sp_delivery_preferences")
+}
+
+model SpUnavailability {
+  id              Int      @id @default(autoincrement())
+  profileId       Int      @map("profile_id")
+  unavailableDate DateTime @map("unavailable_date") @db.Date
+  reason          String? // holiday | personal | other
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("sp_unavailability")
+}
+
+model SpPaymentMethod {
+  id            Int     @id @default(autoincrement())
+  profileId     Int     @map("profile_id")
+  paymentType   String  @map("payment_type") // cash | upi | card | net_banking | cheque | bank_transfer | other
+  upiId         String? @map("upi_id")
+  accountName   String? @map("account_name")
+  accountNumber String? @map("account_number")
+  ifscCode      String? @map("ifsc_code")
+  isActive      Boolean @default(true) @map("is_active")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("sp_payment_methods")
+}
+
+model SpPaymentTerm {
+  id                Int      @id @default(autoincrement())
+  profileId         Int      @unique @map("profile_id")
+  paymentTerms      String   @map("payment_terms") // full_advance | partial_advance | on_delivery
+  partialAdvancePct Decimal? @map("partial_advance_pct") @db.Decimal(5, 2)
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("sp_payment_terms")
+}
+
+model SpScheduleSlot {
+  id          Int      @id @default(autoincrement())
+  profileId   Int      @map("profile_id")
+  slotDate    DateTime @map("slot_date") @db.Date
+  startTime   DateTime @map("start_time") @db.Time
+  endTime     DateTime @map("end_time") @db.Time
+  isAvailable Boolean  @default(true) @map("is_available")
+  bookedBy    Int?     @map("booked_by")
+  orderId     Int?     @map("order_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  profile         Profile @relation(fields: [profileId], references: [id])
+  booker          User?   @relation("SlotBookedBy", fields: [bookedBy], references: [id])
+  order           Order?  @relation("SlotOrder", fields: [orderId], references: [id])
+  ordersScheduled Order[] @relation("OrderScheduledSlot")
+
+  @@map("sp_schedule_slots")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP E — CONTENT & FEED
+// ─────────────────────────────────────────────────────────────
+
+model Post {
+  id                 Int      @id @default(autoincrement())
+  userId             Int      @map("user_id")
+  postType           String   @map("post_type") // buy_sell | ask_help | offer_help | share_update
+  textContent        String?  @map("text_content")
+  sharingAllowed     Boolean  @default(true) @map("sharing_allowed")
+  visibilityCircleId Int?     @map("visibility_circle_id")
+  isActive           Boolean  @default(true) @map("is_active")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  user             User                 @relation(fields: [userId], references: [id])
+  visibilityCircle VisibilityCircle?    @relation(fields: [visibilityCircleId], references: [id])
+  media            PostMedia[]
+  likes            PostLike[]
+  comments         PostComment[]
+  shares           PostShare[]
+  reposts          PostRepost[]
+  removalRequests  FeedRemovalRequest[]
+  groupPosts       InterestGroupPost[]
+
+  @@map("posts")
+}
+
+model PostMedia {
+  id        Int    @id @default(autoincrement())
+  postId    Int    @map("post_id")
+  mediaType String @map("media_type") // photo | video
+  url       String
+  sortOrder Int    @default(0) @map("sort_order")
+
+  post Post @relation(fields: [postId], references: [id])
+
+  @@map("post_media")
+}
+
+model PostLike {
+  id      Int      @id @default(autoincrement())
+  postId  Int      @map("post_id")
+  userId  Int      @map("user_id")
+  likedAt DateTime @default(now()) @map("liked_at")
+
+  post Post @relation(fields: [postId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("post_likes")
+}
+
+model PostComment {
+  id              Int      @id @default(autoincrement())
+  postId          Int      @map("post_id")
+  userId          Int      @map("user_id")
+  parentCommentId Int?     @map("parent_comment_id")
+  comment         String
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  post    Post          @relation(fields: [postId], references: [id])
+  user    User          @relation(fields: [userId], references: [id])
+  parent  PostComment?  @relation("CommentReplies", fields: [parentCommentId], references: [id])
+  replies PostComment[] @relation("CommentReplies")
+
+  @@map("post_comments")
+}
+
+model PostCommentReaction {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  entityType String   @map("entity_type") // post | comment
+  entityId   Int      @map("entity_id")
+  emoji      String
+  reactedAt  DateTime @default(now()) @map("reacted_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("post_comment_reactions")
+}
+
+model PostShare {
+  id       Int      @id @default(autoincrement())
+  postId   Int      @map("post_id")
+  userId   Int      @map("user_id")
+  sharedAt DateTime @default(now()) @map("shared_at")
+
+  post Post @relation(fields: [postId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("post_shares")
+}
+
+model PostRepost {
+  id             Int      @id @default(autoincrement())
+  originalPostId Int      @map("original_post_id")
+  userId         Int      @map("user_id")
+  repostedAt     DateTime @default(now()) @map("reposted_at")
+
+  originalPost Post @relation(fields: [originalPostId], references: [id])
+  user         User @relation(fields: [userId], references: [id])
+
+  @@map("post_reposts")
+}
+
+model FeedRemovalRequest {
+  id           Int      @id @default(autoincrement())
+  postId       Int      @map("post_id")
+  requestedBy  Int      @map("requested_by")
+  durationType String?  @map("duration_type") // 1_day | 1_week | forever
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  post      Post @relation(fields: [postId], references: [id])
+  requester User @relation(fields: [requestedBy], references: [id])
+
+  @@map("feed_removal_requests")
+}
+
+/// Covers event/group/profile share actions.
+model EntityShare {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @map("user_id")
+  entityType     String   @map("entity_type") // event | group | profile
+  entityId       Int      @map("entity_id")
+  sharingChannel String?  @map("sharing_channel") // whatsapp | sms | email | in_app | copy_link
+  sharedAt       DateTime @default(now()) @map("shared_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("entity_shares")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP F — ABUSE REPORTS
+// ─────────────────────────────────────────────────────────────
+
+model AbuseReport {
+  id             Int      @id @default(autoincrement())
+  reportedBy     Int      @map("reported_by")
+  entityType     String   @map("entity_type") // post | event | photo | group | user | content
+  entityId       Int      @map("entity_id")
+  reportedUserId Int?     @map("reported_user_id")
+  reason         String?
+  status         String? // pending | reviewed | dismissed
+  reviewedBy     Int?     @map("reviewed_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  reporter     User   @relation("AbuseReporter", fields: [reportedBy], references: [id])
+  reportedUser User?  @relation("AbuseReportedUser", fields: [reportedUserId], references: [id])
+  reviewer     Admin? @relation(fields: [reviewedBy], references: [id])
+
+  @@map("abuse_reports")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP G — EVENTS
+// ─────────────────────────────────────────────────────────────
+
+model Event {
+  id                  Int       @id @default(autoincrement())
+  creatorId           Int       @map("creator_id")
+  parentEventId       Int?      @map("parent_event_id")
+  clonedBy            Int?      @map("cloned_by")
+  title               String
+  description         String?
+  photoUrl            String?   @map("photo_url")
+  date                DateTime  @db.Date
+  startTime           DateTime? @map("start_time") @db.Time
+  durationMinutes     Int?      @map("duration_minutes")
+  mode                String // online | offline
+  location            String?
+  onlineLink          String?   @map("online_link")
+  visibilityCircleId  Int?      @map("visibility_circle_id")
+  isPrivate           Boolean   @default(false) @map("is_private")
+  isPaid              Boolean   @default(false) @map("is_paid")
+  price               Decimal?  @db.Decimal(10, 2)
+  maxAttendees        Int?      @map("max_attendees")
+  couponId            Int?      @map("coupon_id")
+  eligibilityMinAge   Int?      @map("eligibility_min_age")
+  eligibilityGender   String?   @map("eligibility_gender") // all | male | female
+  adminApprovalNeeded Boolean   @default(false) @map("admin_approval_needed")
+  allowCloning        Boolean   @default(false) @map("allow_cloning")
+  isActive            Boolean   @default(true) @map("is_active")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  creator          User                   @relation("EventCreator", fields: [creatorId], references: [id])
+  cloner           User?                  @relation("EventCloner", fields: [clonedBy], references: [id])
+  parentEvent      Event?                 @relation("EventClones", fields: [parentEventId], references: [id])
+  clones           Event[]                @relation("EventClones")
+  visibilityCircle VisibilityCircle?      @relation(fields: [visibilityCircleId], references: [id])
+  coupon           CouponCode?            @relation(fields: [couponId], references: [id])
+  rawMaterials     EventRawMaterial[]
+  attendees        EventAttendee[]
+  ratings          EventRating[]          @relation("EventRatingEvent")
+  ratingsAsParent  EventRating[]          @relation("EventRatingParent")
+  payments         EventPayment[]
+  invitedUsers     EventInvitedUser[]
+  deletionRequests EventDeletionRequest[]
+  referrals        Referral[]
+
+  @@map("events")
+}
+
+model EventRawMaterial {
+  id       Int    @id @default(autoincrement())
+  eventId  Int    @map("event_id")
+  material String
+
+  event Event @relation(fields: [eventId], references: [id])
+
+  @@map("event_raw_materials")
+}
+
+model EventAttendee {
+  id            Int      @id @default(autoincrement())
+  eventId       Int      @map("event_id")
+  userId        Int      @map("user_id")
+  status        String // joined | withdrawn | pending_approval
+  paymentStatus String?  @map("payment_status") // paid | unpaid | refunded
+  joinedAt      DateTime @default(now()) @map("joined_at")
+
+  event Event @relation(fields: [eventId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@map("event_attendees")
+}
+
+model EventRating {
+  id            Int      @id @default(autoincrement())
+  eventId       Int      @map("event_id")
+  parentEventId Int?     @map("parent_event_id")
+  userId        Int      @map("user_id")
+  rating        Int?
+  review        String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  event       Event  @relation("EventRatingEvent", fields: [eventId], references: [id])
+  parentEvent Event? @relation("EventRatingParent", fields: [parentEventId], references: [id])
+  user        User   @relation(fields: [userId], references: [id])
+
+  @@map("event_ratings")
+}
+
+model EventPayment {
+  id              Int       @id @default(autoincrement())
+  eventId         Int       @map("event_id")
+  userId          Int       @map("user_id")
+  amount          Decimal   @db.Decimal(10, 2)
+  couponId        Int?      @map("coupon_id")
+  discountApplied Decimal   @default(0) @map("discount_applied") @db.Decimal(10, 2)
+  paymentStatus   String    @map("payment_status") // pending | paid | refunded
+  transactionRef  String?   @map("transaction_ref")
+  paidAt          DateTime? @map("paid_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  event  Event       @relation(fields: [eventId], references: [id])
+  user   User        @relation(fields: [userId], references: [id])
+  coupon CouponCode? @relation(fields: [couponId], references: [id])
+
+  @@map("event_payments")
+}
+
+model EventInvitedUser {
+  id            Int      @id @default(autoincrement())
+  eventId       Int      @map("event_id")
+  invitedUserId Int      @map("invited_user_id")
+  invitedAt     DateTime @default(now()) @map("invited_at")
+  status        String? // pending | accepted | declined
+
+  event       Event @relation(fields: [eventId], references: [id])
+  invitedUser User  @relation(fields: [invitedUserId], references: [id])
+
+  @@map("event_invited_users")
+}
+
+model EventDeletionRequest {
+  id          Int       @id @default(autoincrement())
+  eventId     Int       @map("event_id")
+  requestedBy Int       @map("requested_by")
+  reason      String?
+  status      String? // pending | approved | rejected
+  reviewedBy  Int?      @map("reviewed_by")
+  reviewedAt  DateTime? @map("reviewed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  event     Event  @relation(fields: [eventId], references: [id])
+  requester User   @relation(fields: [requestedBy], references: [id])
+  reviewer  Admin? @relation(fields: [reviewedBy], references: [id])
+
+  @@map("event_deletion_requests")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP H — INTEREST GROUPS
+// ─────────────────────────────────────────────────────────────
+
+model InterestGroup {
+  id                    Int       @id @default(autoincrement())
+  creatorId             Int       @map("creator_id")
+  title                 String
+  description           String?
+  photoUrl              String?   @map("photo_url")
+  durationDays          Int?      @map("duration_days")
+  validityFrom          DateTime? @map("validity_from") @db.Date
+  validityTo            DateTime? @map("validity_to") @db.Date
+  visibilityCircleId    Int?      @map("visibility_circle_id")
+  isPrivate             Boolean   @default(false) @map("is_private")
+  isPaid                Boolean   @default(false) @map("is_paid")
+  price                 Decimal?  @db.Decimal(10, 2)
+  couponId              Int?      @map("coupon_id")
+  maxMembers            Int?      @map("max_members")
+  eligibilityMinAge     Int?      @map("eligibility_min_age")
+  eligibilityGender     String?   @map("eligibility_gender") // all | male | female
+  adminApprovalNeeded   Boolean   @default(false) @map("admin_approval_needed")
+  multipleAdminsAllowed Boolean   @default(false) @map("multiple_admins_allowed")
+  isActive              Boolean   @default(true) @map("is_active")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  creator            User                             @relation(fields: [creatorId], references: [id])
+  visibilityCircle   VisibilityCircle?                @relation(fields: [visibilityCircleId], references: [id])
+  coupon             CouponCode?                      @relation(fields: [couponId], references: [id])
+  admins             InterestGroupAdmin[]
+  members            InterestGroupMember[]
+  payments           InterestGroupPayment[]
+  posts              InterestGroupPost[]
+  ratings            InterestGroupRating[]
+  invitedUsers       InterestGroupInvitedUser[]
+  ownershipTransfers InterestGroupOwnershipTransfer[]
+
+  @@map("interest_groups")
+}
+
+model InterestGroupAdmin {
+  id        Int      @id @default(autoincrement())
+  groupId   Int      @map("group_id")
+  userId    Int      @map("user_id")
+  isCreator Boolean  @default(false) @map("is_creator")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  group InterestGroup @relation(fields: [groupId], references: [id])
+  user  User          @relation(fields: [userId], references: [id])
+
+  @@map("interest_group_admins")
+}
+
+model InterestGroupMember {
+  id            Int      @id @default(autoincrement())
+  groupId       Int      @map("group_id")
+  userId        Int      @map("user_id")
+  status        String // joined | exited | pending_approval
+  paymentStatus String?  @map("payment_status") // paid | unpaid | refunded
+  joinedAt      DateTime @default(now()) @map("joined_at")
+
+  group InterestGroup @relation(fields: [groupId], references: [id])
+  user  User          @relation(fields: [userId], references: [id])
+
+  @@map("interest_group_members")
+}
+
+model InterestGroupPayment {
+  id              Int       @id @default(autoincrement())
+  groupId         Int       @map("group_id")
+  userId          Int       @map("user_id")
+  amount          Decimal   @db.Decimal(10, 2)
+  couponId        Int?      @map("coupon_id")
+  discountApplied Decimal   @default(0) @map("discount_applied") @db.Decimal(10, 2)
+  paymentStatus   String    @map("payment_status") // pending | paid | refunded
+  transactionRef  String?   @map("transaction_ref")
+  paidAt          DateTime? @map("paid_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  group  InterestGroup @relation(fields: [groupId], references: [id])
+  user   User          @relation(fields: [userId], references: [id])
+  coupon CouponCode?   @relation(fields: [couponId], references: [id])
+
+  @@map("interest_group_payments")
+}
+
+model InterestGroupPost {
+  id      Int @id @default(autoincrement())
+  groupId Int @map("group_id")
+  postId  Int @map("post_id")
+
+  group InterestGroup @relation(fields: [groupId], references: [id])
+  post  Post          @relation(fields: [postId], references: [id])
+
+  @@map("interest_group_posts")
+}
+
+model InterestGroupRating {
+  id        Int      @id @default(autoincrement())
+  groupId   Int      @map("group_id")
+  userId    Int      @map("user_id")
+  rating    Int?
+  review    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  group InterestGroup @relation(fields: [groupId], references: [id])
+  user  User          @relation(fields: [userId], references: [id])
+
+  @@map("interest_group_ratings")
+}
+
+model InterestGroupInvitedUser {
+  id            Int      @id @default(autoincrement())
+  groupId       Int      @map("group_id")
+  invitedUserId Int      @map("invited_user_id")
+  invitedAt     DateTime @default(now()) @map("invited_at")
+  status        String? // pending | accepted | declined
+
+  group       InterestGroup @relation(fields: [groupId], references: [id])
+  invitedUser User          @relation(fields: [invitedUserId], references: [id])
+
+  @@map("interest_group_invited_users")
+}
+
+model InterestGroupOwnershipTransfer {
+  id              Int      @id @default(autoincrement())
+  groupId         Int      @map("group_id")
+  transferredFrom Int      @map("transferred_from")
+  transferredTo   Int      @map("transferred_to")
+  transferReason  String?  @map("transfer_reason") // voluntary | creator_exit_request | admin_action
+  initiatedBy     Int?     @map("initiated_by")
+  transferredAt   DateTime @default(now()) @map("transferred_at")
+
+  group     InterestGroup @relation(fields: [groupId], references: [id])
+  fromUser  User          @relation("TransferFrom", fields: [transferredFrom], references: [id])
+  toUser    User          @relation("TransferTo", fields: [transferredTo], references: [id])
+  initiator User?         @relation("TransferInitiator", fields: [initiatedBy], references: [id])
+
+  @@map("interest_group_ownership_transfers")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP I — REFERRAL SYSTEM
+// ─────────────────────────────────────────────────────────────
+
+model Referral {
+  id                       Int       @id @default(autoincrement())
+  referrerId               Int       @map("referrer_id")
+  referredUserId           Int?      @map("referred_user_id")
+  referralSourceId         Int?      @map("referral_source_id")
+  eventId                  Int?      @map("event_id")
+  cityId                   Int?      @map("city_id")
+  sharingChannel           String?   @map("sharing_channel") // whatsapp | sms | email
+  status                   String // sent | opened | partial_registration | complete_registration
+  openedAt                 DateTime? @map("opened_at")
+  registeredAt             DateTime? @map("registered_at")
+  pointsCredited           Int       @default(0) @map("points_credited")
+  pointsCreditedAt         DateTime? @map("points_credited_at")
+  pointsExpiresAt          DateTime? @map("points_expires_at")
+  redeemedAgainstFreebieId Int?      @map("redeemed_against_freebie_id")
+  redeemedAt               DateTime? @map("redeemed_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+
+  referrer       User            @relation("ReferralReferrer", fields: [referrerId], references: [id])
+  referredUser   User?           @relation("ReferralReferred", fields: [referredUserId], references: [id])
+  referralSource ReferralSource? @relation(fields: [referralSourceId], references: [id])
+  event          Event?          @relation(fields: [eventId], references: [id])
+  city           City?           @relation(fields: [cityId], references: [id])
+  freebie        Freebie?        @relation(fields: [redeemedAgainstFreebieId], references: [id])
+
+  @@map("referrals")
+}
+
+model ReferralDailyCap {
+  id            Int      @id @default(autoincrement())
+  userId        Int      @map("user_id")
+  capDate       DateTime @map("cap_date") @db.Date
+  referralsSent Int      @default(0) @map("referrals_sent")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, capDate])
+  @@map("referral_daily_caps")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP J — MESSAGING
+// ─────────────────────────────────────────────────────────────
+
+model Message {
+  id                  Int      @id @default(autoincrement())
+  senderId            Int      @map("sender_id")
+  receiverId          Int      @map("receiver_id")
+  messageType         String   @map("message_type") // direct | enquiry
+  content             String
+  entityType          String?  @map("entity_type") // sp_profile | event | group | post
+  entityId            Int?     @map("entity_id")
+  enquiryStatus       String?  @map("enquiry_status") // pending | replied | closed
+  conversationId      String?  @map("conversation_id")
+  isRead              Boolean  @default(false) @map("is_read")
+  isDeletedBySender   Boolean  @default(false) @map("is_deleted_by_sender")
+  isDeletedByReceiver Boolean  @default(false) @map("is_deleted_by_receiver")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  sender   User @relation("MessageSender", fields: [senderId], references: [id])
+  receiver User @relation("MessageReceiver", fields: [receiverId], references: [id])
+
+  @@map("messages")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP K — RATINGS
+// ─────────────────────────────────────────────────────────────
+
+model ServiceProviderRating {
+  id          Int      @id @default(autoincrement())
+  profileId   Int      @map("profile_id")
+  ratedBy     Int      @map("rated_by")
+  rating      Int
+  review      String?
+  areaContext String?  @map("area_context") // apartment | lane | area | city
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+  rater   User    @relation(fields: [ratedBy], references: [id])
+
+  @@map("service_provider_ratings")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP L — SEARCH
+// ─────────────────────────────────────────────────────────────
+
+model SearchLog {
+  id               Int      @id @default(autoincrement())
+  userId           Int?     @map("user_id")
+  query            String
+  filters          Json?
+  resultsCount     Int?     @map("results_count")
+  resultEntityType String?  @map("result_entity_type") // sp_profile | event | group | post
+  resultEntityId   Int?     @map("result_entity_id")
+  searchedAt       DateTime @default(now()) @map("searched_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("search_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP M — ADMIN OPERATIONS
+// ─────────────────────────────────────────────────────────────
+
+model ProfileVerification {
+  id              Int       @id @default(autoincrement())
+  userId          Int       @map("user_id")
+  status          String // pending | approved | rejected
+  reviewedBy      Int?      @map("reviewed_by")
+  rejectionReason String?   @map("rejection_reason")
+  reviewedAt      DateTime? @map("reviewed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  user     User   @relation(fields: [userId], references: [id])
+  reviewer Admin? @relation(fields: [reviewedBy], references: [id])
+
+  @@map("profile_verifications")
+}
+
+model WhitelistedBlacklistedUser {
+  id     Int      @id @default(autoincrement())
+  userId Int      @map("user_id")
+  status String // whitelisted | blacklisted
+  reason String?
+  setBy  Int?     @map("set_by")
+  setAt  DateTime @default(now()) @map("set_at")
+
+  user       User   @relation(fields: [userId], references: [id])
+  setByAdmin Admin? @relation(fields: [setBy], references: [id])
+
+  @@map("whitelisted_blacklisted_users")
+}
+
+model AdminEmail {
+  id             Int      @id @default(autoincrement())
+  adminId        Int      @map("admin_id")
+  toUserId       Int?     @map("to_user_id")
+  replyToEmailId Int?     @map("reply_to_email_id")
+  subject        String
+  body           String
+  emailTag       String?  @map("email_tag") // verification | announcement | warning | reminder
+  direction      String   @default("outbound") // outbound | inbound
+  sentAt         DateTime @default(now()) @map("sent_at")
+
+  admin   Admin        @relation(fields: [adminId], references: [id])
+  toUser  User?        @relation(fields: [toUserId], references: [id])
+  replyTo AdminEmail?  @relation("EmailThread", fields: [replyToEmailId], references: [id])
+  replies AdminEmail[] @relation("EmailThread")
+
+  @@map("admin_emails")
+}
+
+model PermissionMaster {
+  id        Int     @id @default(autoincrement())
+  userType  String  @map("user_type") // resident | service_provider
+  action    String // event_create | event_edit | ...
+  isAllowed Boolean @default(true) @map("is_allowed")
+
+  @@map("permissions_master")
+}
+
+/// Complete audit trail for all admin actions.
+model AdminAuditLog {
+  id          Int      @id @default(autoincrement())
+  adminId     Int      @map("admin_id")
+  action      String
+  entityType  String?  @map("entity_type")
+  entityId    Int?     @map("entity_id")
+  details     Json?
+  performedAt DateTime @default(now()) @map("performed_at")
+
+  admin Admin @relation(fields: [adminId], references: [id])
+
+  @@map("admin_audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP N — ORDERS
+// ─────────────────────────────────────────────────────────────
+
+model Order {
+  id                  Int       @id @default(autoincrement())
+  buyerId             Int       @map("buyer_id")
+  spProfileId         Int       @map("sp_profile_id")
+  status              String // placed | confirmed | in_progress | delivered | completed | cancelled | refund_requested
+  deliveryType        String?   @map("delivery_type") // home_delivery | pickup
+  deliveryAddressId   Int?      @map("delivery_address_id")
+  scheduledSlotId     Int?      @map("scheduled_slot_id")
+  subtotal            Decimal   @db.Decimal(10, 2)
+  deliveryCharge      Decimal   @default(0) @map("delivery_charge") @db.Decimal(10, 2)
+  discountApplied     Decimal   @default(0) @map("discount_applied") @db.Decimal(10, 2)
+  totalAmount         Decimal   @map("total_amount") @db.Decimal(10, 2)
+  couponId            Int?      @map("coupon_id")
+  specialInstructions String?   @map("special_instructions")
+  placedAt            DateTime  @default(now()) @map("placed_at")
+  confirmedAt         DateTime? @map("confirmed_at")
+  deliveredAt         DateTime? @map("delivered_at")
+  completedAt         DateTime? @map("completed_at")
+  cancelledAt         DateTime? @map("cancelled_at")
+  cancellationReason  String?   @map("cancellation_reason")
+
+  buyer           User             @relation(fields: [buyerId], references: [id])
+  spProfile       Profile          @relation(fields: [spProfileId], references: [id])
+  deliveryAddress Address?         @relation(fields: [deliveryAddressId], references: [id])
+  scheduledSlot   SpScheduleSlot?  @relation("OrderScheduledSlot", fields: [scheduledSlotId], references: [id])
+  coupon          CouponCode?      @relation(fields: [couponId], references: [id])
+  slotBookings    SpScheduleSlot[] @relation("SlotOrder")
+  items           OrderItem[]
+  payments        OrderPayment[]
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id                 Int     @id @default(autoincrement())
+  orderId            Int     @map("order_id")
+  productId          Int     @map("product_id")
+  quantity           Decimal @default(1) @db.Decimal(10, 3)
+  unitPrice          Decimal @map("unit_price") @db.Decimal(10, 2)
+  totalPrice         Decimal @map("total_price") @db.Decimal(10, 2)
+  customizationNotes String? @map("customization_notes")
+
+  order   Order     @relation(fields: [orderId], references: [id])
+  product SpProduct @relation(fields: [productId], references: [id])
+
+  @@map("order_items")
+}
+
+model OrderPayment {
+  id             Int       @id @default(autoincrement())
+  orderId        Int       @map("order_id")
+  amount         Decimal   @db.Decimal(10, 2)
+  paymentType    String    @map("payment_type") // advance | partial | final | refund
+  paymentMethod  String?   @map("payment_method") // cash | upi | card | net_banking | bank_transfer
+  paymentStatus  String    @map("payment_status") // pending | paid | failed | refunded
+  transactionRef String?   @map("transaction_ref")
+  paidAt         DateTime? @map("paid_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@map("order_payments")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP O — REFUND REQUESTS
+// ─────────────────────────────────────────────────────────────
+
+model RefundRequest {
+  id                Int       @id @default(autoincrement())
+  requestedBy       Int       @map("requested_by")
+  entityType        String    @map("entity_type") // event | group | order
+  entityId          Int       @map("entity_id")
+  amountRequested   Decimal   @map("amount_requested") @db.Decimal(10, 2)
+  reason            String?
+  status            String // pending | approved | rejected | processed
+  reviewedBy        Int?      @map("reviewed_by")
+  reviewedAt        DateTime? @map("reviewed_at")
+  refundProcessedAt DateTime? @map("refund_processed_at")
+  refundAmount      Decimal?  @map("refund_amount") @db.Decimal(10, 2)
+  transactionRef    String?   @map("transaction_ref")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  requester User   @relation(fields: [requestedBy], references: [id])
+  reviewer  Admin? @relation(fields: [reviewedBy], references: [id])
+
+  @@map("refund_requests")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP P — NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────
+
+model Notification {
+  id               Int      @id @default(autoincrement())
+  userId           Int      @map("user_id")
+  title            String
+  body             String?
+  notificationType String   @map("notification_type")
+  entityType       String?  @map("entity_type")
+  entityId         Int?     @map("entity_id")
+  isRead           Boolean  @default(false) @map("is_read")
+  isPushed         Boolean  @default(false) @map("is_pushed")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GROUP Q — STATS (denormalised)
+// ─────────────────────────────────────────────────────────────
+
+model UserStats {
+  id                    Int      @id @default(autoincrement())
+  userId                Int      @unique @map("user_id")
+  servicesAvailed       Int      @default(0) @map("services_availed")
+  messagesSent          Int      @default(0) @map("messages_sent")
+  repliesPending        Int      @default(0) @map("replies_pending")
+  postsMade             Int      @default(0) @map("posts_made")
+  eventsHosted          Int      @default(0) @map("events_hosted")
+  groupsPartOf          Int      @default(0) @map("groups_part_of")
+  referralPointsBalance Int      @default(0) @map("referral_points_balance")
+  leadsReceived         Int      @default(0) @map("leads_received")
+  leadsRejected         Int      @default(0) @map("leads_rejected")
+  ordersReceived        Int      @default(0) @map("orders_received")
+  paymentReceivedTotal  Decimal  @default(0) @map("payment_received_total") @db.Decimal(10, 2)
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("user_stats")
+}
