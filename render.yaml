@@ -1,0 +1,32 @@
+# Render Blueprint — deploy the Link Local backend as a Node web service.
+# In Render: New → Blueprint → pick this repo. Then set the secret env vars
+# (DATABASE_URL, DIRECT_URL, JWT secrets) in the dashboard.
+services:
+  - type: web
+    name: link-local-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_PREFIX
+        value: /api/v1
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: JWT_ACCESS_EXPIRES_IN
+        value: 15m
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 30d
+      # Secrets — set these in the Render dashboard (sync:false keeps them out of git):
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
