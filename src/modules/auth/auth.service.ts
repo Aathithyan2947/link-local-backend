@@ -155,12 +155,13 @@ export async function requestOtp(input: OtpRequestInput) {
     },
   });
 
-  // In production this would be sent via SMS/email. In dev we log + return it.
+  // In production this would be sent via SMS/email. For now we log it, and also
+  // return it when not in production OR when EXPOSE_OTP=true (device testing).
   logger.info(`OTP for ${mobile ?? email} (${purpose}): ${otpCode}`);
   return {
     sent: true,
     expiresInSeconds: 600,
-    ...(env.isProd ? {} : { devOtp: otpCode }),
+    ...(env.isProd && !env.exposeOtp ? {} : { devOtp: otpCode }),
   };
 }
 

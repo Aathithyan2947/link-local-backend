@@ -15,6 +15,9 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default('*'),
   UPLOAD_DIR: z.string().default('uploads'),
   MAX_UPLOAD_MB: z.coerce.number().default(10),
+  // Set to "true" to return the OTP in the API response even in production
+  // (for device testing against a hosted backend before SMS/email is wired up).
+  EXPOSE_OTP: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -29,6 +32,7 @@ export const env = {
   ...parsed.data,
   isProd: parsed.data.NODE_ENV === 'production',
   isDev: parsed.data.NODE_ENV === 'development',
+  exposeOtp: parsed.data.EXPOSE_OTP === 'true',
   corsOrigins:
     parsed.data.CORS_ORIGINS === '*'
       ? '*'

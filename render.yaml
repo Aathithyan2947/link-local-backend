@@ -23,6 +23,10 @@ services:
         value: 15m
       - key: JWT_REFRESH_EXPIRES_IN
         value: 30d
+      # Set EXPOSE_OTP=true in the dashboard to return the OTP in API responses
+      # for device testing (temporary, until SMS/email OTP delivery is wired up).
+      - key: EXPOSE_OTP
+        sync: false
       # Secrets — set these in the Render dashboard (sync:false keeps them out of git):
       - key: DATABASE_URL
         sync: false
