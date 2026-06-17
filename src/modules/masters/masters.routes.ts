@@ -138,6 +138,7 @@ mastersRouter.use(
     updateSchema: s.docTypeUpdate,
     searchFields: ['docType'],
     filterFields: ['cityId'],
+    include: { city: { select: { id: true, name: true } } },
     publicRead: true,
   }),
 );

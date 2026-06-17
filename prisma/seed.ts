@@ -4,6 +4,8 @@ import { serviceCategories } from './data/service-categories.js';
 import {
   complexes,
   localityPincodes,
+  localityCoords,
+  DIRECTORY_DEFAULT_COORD,
   DIRECTORY_CITY,
   DIRECTORY_SUBURB,
   DIRECTORY_ROAD,
@@ -36,6 +38,7 @@ async function main() {
     ['Bengaluru', 'Karnataka'],
     ['Pune', 'Maharashtra'],
     ['Delhi', 'Delhi'],
+    ['Madurai', 'Tamil Nadu'],
   ] as const) {
     const exists = await prisma.city.findFirst({ where: { name } });
     if (!exists) await prisma.city.create({ data: { name, state } });
@@ -101,6 +104,37 @@ async function main() {
       })),
     });
     console.log(`   ✓ ${complexes.length} complexes (addresses)`);
+  }
+
+  // ── Address Master (curated suggestions, approved) ─────────
+  // One approved master row per complex (building), carrying its lane/locality/pincode and
+  // a locality-level lat/lng. The app autocompletes against the complex name and, on
+  // selection, fills the building too. The 2 km GPS autofill uses the same rows but never
+  // fills the building. User flat/plot numbers are never stored here.
+  if ((await prisma.addressMaster.count()) === 0) {
+    const seen = new Set<string>();
+    const masterRows = [];
+    for (const c of complexes) {
+      const key = `${c.complex.toLowerCase()}|${c.lane1.toLowerCase()}|${c.locality.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const coord = localityCoords[c.locality] ?? DIRECTORY_DEFAULT_COORD;
+      masterRows.push({
+        cityId: city.id,
+        complex: c.complex,
+        lane1: c.lane1,
+        lane2: c.locality,
+        area: DIRECTORY_ROAD,
+        suburb: DIRECTORY_SUBURB,
+        pincode: localityPincodes[c.locality] ?? '400615',
+        latitude: coord.lat,
+        longitude: coord.lng,
+        status: 'approved',
+        source: 'import',
+      });
+    }
+    await prisma.addressMaster.createMany({ data: masterRows });
+    console.log(`   ✓ ${masterRows.length} address-master complexes`);
   }
 
   // ── Professions + Hobbies ──────────────────────────────────

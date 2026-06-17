@@ -57,9 +57,10 @@ export const contactSchema = z.object({
 
 export const serviceTypesSchema = z.object({
   subcategoryIds: z.array(z.number().int()).default([]),
-  // Free-text "Other" services to flag for admin approval.
+  // Free-text "Other" services to flag for admin approval. categoryId is optional — when
+  // omitted (a single global "Other"), it's filed under a fallback "Other" category.
   customServices: z
-    .array(z.object({ categoryId: z.number().int(), name: z.string().min(1) }))
+    .array(z.object({ categoryId: z.number().int().optional(), name: z.string().min(1) }))
     .optional(),
 });
 

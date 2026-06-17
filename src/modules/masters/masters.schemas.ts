@@ -43,6 +43,7 @@ export const educationSchema = z.object({
   schoolCity: z.string().optional(),
   collegeName: z.string().optional(),
   collegeCity: z.string().optional(),
+  university: z.string().optional(),
   postGradCollege: z.string().optional(),
   postGradCity: z.string().optional(),
 });

@@ -1,5 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
+import { ApiError } from '../../utils/ApiError.js';
+import { hashPassword } from '../../utils/password.js';
 
 export async function listMembers(
   params: PaginationParams & { q?: string; userType?: string; status?: string },
@@ -218,14 +220,34 @@ export async function listGroupsAdmin(params: PaginationParams & { q?: string })
 }
 
 // ── Activity logs ────────────────────────────────────────────
-export async function listActivityLogs(params: PaginationParams) {
+export async function listActivityLogs(
+  params: PaginationParams & { q?: string; action?: string; adminId?: number; from?: string; to?: string },
+) {
+  const where: Record<string, unknown> = {};
+  if (params.adminId) where.adminId = params.adminId;
+  if (params.action) where.action = { contains: params.action, mode: 'insensitive' };
+  if (params.q) {
+    where.OR = [
+      { action: { contains: params.q, mode: 'insensitive' } },
+      { entityType: { contains: params.q, mode: 'insensitive' } },
+      { admin: { name: { contains: params.q, mode: 'insensitive' } } },
+    ];
+  }
+  if (params.from || params.to) {
+    const range: Record<string, Date> = {};
+    if (params.from) range.gte = new Date(params.from);
+    if (params.to) range.lte = new Date(`${params.to}T23:59:59.999`);
+    where.performedAt = range;
+  }
+
   const [rows, total] = await Promise.all([
     prisma.adminAuditLog.findMany({
+      where,
       orderBy: { performedAt: 'desc' },
       ...toPrismaPagination(params),
       include: { admin: { select: { name: true, email: true } } },
     }),
-    prisma.adminAuditLog.count(),
+    prisma.adminAuditLog.count({ where }),
   ]);
   return { items: rows, meta: buildMeta(params.page, params.pageSize, total) };
 }
@@ -274,4 +296,68 @@ export async function getDashboard() {
     posts,
     pending: { addressDocs: pendingDocs, profileVerifications: pendingVerifications },
   };
+}
+
+// ── Profile tag assignment (ProfileTagMap) ───────────────────
+export async function getMemberTags(userId: number) {
+  const profile = await prisma.profile.findUnique({ where: { userId }, select: { id: true } });
+  if (!profile) return { tagIds: [] as number[] };
+  const maps = await prisma.profileTagMap.findMany({
+    where: { profileId: profile.id },
+    select: { tagId: true },
+  });
+  return { tagIds: maps.map((m) => m.tagId) };
+}
+
+/** Replace the full set of tags on a member's profile. */
+export async function setMemberTags(userId: number, tagIds: number[], adminId: number) {
+  const profile = await prisma.profile.findUnique({ where: { userId }, select: { id: true } });
+  if (!profile) throw ApiError.notFound('Profile not found');
+  const unique = Array.from(new Set(tagIds));
+  await prisma.$transaction([
+    prisma.profileTagMap.deleteMany({ where: { profileId: profile.id } }),
+    prisma.profileTagMap.createMany({
+      data: unique.map((tagId) => ({ profileId: profile.id, tagId, assignedBy: adminId })),
+    }),
+  ]);
+  return getMemberTags(userId);
+}
+
+// ── Admins management (super admin only) ─────────────────────
+const adminSelect = { id: true, name: true, email: true, role: true, isActive: true, createdAt: true } as const;
+
+export async function listAdmins(params: PaginationParams & { q?: string }) {
+  const where: Record<string, unknown> = {};
+  if (params.q) {
+    where.OR = [
+      { name: { contains: params.q, mode: 'insensitive' } },
+      { email: { contains: params.q, mode: 'insensitive' } },
+    ];
+  }
+  const [rows, total] = await Promise.all([
+    prisma.admin.findMany({ where, orderBy: { createdAt: 'desc' }, ...toPrismaPagination(params), select: adminSelect }),
+    prisma.admin.count({ where }),
+  ]);
+  return { items: rows, meta: buildMeta(params.page, params.pageSize, total) };
+}
+
+export async function createAdmin(input: { name: string; email: string; password: string; role: string }) {
+  const existing = await prisma.admin.findUnique({ where: { email: input.email } });
+  if (existing) throw ApiError.conflict('An admin with this email already exists');
+  return prisma.admin.create({
+    data: { name: input.name, email: input.email, password: await hashPassword(input.password), role: input.role },
+    select: adminSelect,
+  });
+}
+
+export async function updateAdmin(
+  id: number,
+  input: { name?: string; role?: string; isActive?: boolean; password?: string },
+) {
+  const data: Record<string, unknown> = {};
+  if (input.name !== undefined) data.name = input.name;
+  if (input.role !== undefined) data.role = input.role;
+  if (input.isActive !== undefined) data.isActive = input.isActive;
+  if (input.password) data.password = await hashPassword(input.password);
+  return prisma.admin.update({ where: { id }, data, select: adminSelect });
 }

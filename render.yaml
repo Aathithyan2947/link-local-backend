@@ -8,7 +8,8 @@ services:
     plan: free
     # --include=dev forces devDependencies (typescript + @types/*) to install even
     # though NODE_ENV=production would otherwise omit them and break `tsc`.
-    buildCommand: npm install --include=dev && npx prisma generate && npm run build
+    # `prisma migrate deploy` applies any pending migrations to the (Neon) DB on each deploy.
+    buildCommand: npm install --include=dev && npx prisma generate && npx prisma migrate deploy && npm run build
     startCommand: npm start
     healthCheckPath: /health
     autoDeploy: true

@@ -1,7 +1,11 @@
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
-import type { CreateAddressInput } from './addresses.schema.js';
+import type {
+  CreateAddressInput,
+  CreateMasterInput,
+  UpdateMasterInput,
+} from './addresses.schema.js';
 
 /** Resolves an area id from the payload, creating one under the city if needed. */
 async function resolveAreaId(input: CreateAddressInput): Promise<number> {
@@ -31,6 +35,9 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
 
   const areaId = await resolveAreaId(input);
 
+  // The user's private address keeps their building/flat + exact pin; it is usable
+  // immediately (no admin gate). The shared locality is queued into the Address Master
+  // separately, where it waits for approval before being suggested to other users.
   const address = await prisma.address.create({
     data: {
       areaId,
@@ -41,9 +48,6 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
       fullAddress: input.fullAddress,
       latitude: input.latitude,
       longitude: input.longitude,
-      // New user-submitted addresses are flagged for admin screening (PRD):
-      // they show as Inactive in Address Capture until an admin validates/activates.
-      isActive: false,
     },
   });
 
@@ -54,6 +58,20 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
     where: { userId_cityId: { userId, cityId: input.cityId } },
     update: {},
     create: { userId, cityId: input.cityId, isPrimary: true },
+  });
+
+  // Feed the locality (no building/flat) into the Address Master — reuse an approved
+  // match or queue a new pending one. Never blocks the user.
+  await upsertMasterFromSubmission({
+    cityId: input.cityId,
+    lane1: input.lane1,
+    lane2: input.lane2,
+    area: input.areaName,
+    suburb: input.suburb,
+    pincode: input.pincode,
+    latitude: input.latitude,
+    longitude: input.longitude,
+    userId,
   });
 
   return prisma.address.findUnique({
@@ -91,51 +109,208 @@ export async function addVerificationDoc(params: {
   });
 }
 
-/** Directory search powering the app's address autocomplete (localities + known complexes). */
+/**
+ * Directory autocomplete powering the app's address search. Suggestions come ONLY from the
+ * approved Address Master (deduped localities/lanes) — never from per-user building names.
+ */
 export async function searchDirectory(q: string) {
   const term = q.trim();
-  if (term.length < 2) return { localities: [], complexes: [] };
+  if (term.length < 2) return { localities: [] };
 
-  const [areas, complexRows] = await Promise.all([
-    prisma.area.findMany({
-      where: { areaName: { contains: term, mode: 'insensitive' } },
-      include: { city: { select: { name: true, state: true } } },
-      orderBy: { areaName: 'asc' },
-      take: 10,
-    }),
-    prisma.address.findMany({
-      where: { apartment: { contains: term, mode: 'insensitive' } },
-      select: {
-        apartment: true,
-        lane1: true,
-        lane2: true,
-        area: { select: { id: true, areaName: true, suburb: true, pincode: true, cityId: true, city: { select: { name: true } } } },
-      },
-      distinct: ['apartment'],
-      orderBy: { apartment: 'asc' },
-      take: 12,
-    }),
-  ]);
+  const rows = await prisma.addressMaster.findMany({
+    where: {
+      status: 'approved',
+      OR: [
+        { complex: { contains: term, mode: 'insensitive' } },
+        { lane1: { contains: term, mode: 'insensitive' } },
+        { lane2: { contains: term, mode: 'insensitive' } },
+        { area: { contains: term, mode: 'insensitive' } },
+        { suburb: { contains: term, mode: 'insensitive' } },
+        { pincode: { contains: term, mode: 'insensitive' } },
+      ],
+    },
+    include: { city: { select: { name: true, state: true } } },
+    orderBy: [{ complex: 'asc' }, { lane2: 'asc' }, { lane1: 'asc' }],
+    take: 15,
+  });
 
   return {
-    localities: areas.map((a) => ({
-      areaId: a.id,
-      cityId: a.cityId,
-      areaName: a.areaName,
-      suburb: a.suburb,
-      pincode: a.pincode,
-      city: a.city.name,
-    })),
-    complexes: complexRows.map((c) => ({
-      apartment: c.apartment,
-      lane1: c.lane1,
-      locality: c.lane2 ?? c.area.areaName,
-      areaId: c.area.id,
-      cityId: c.area.cityId,
-      pincode: c.area.pincode,
-      city: c.area.city.name,
+    localities: rows.map((m) => ({
+      masterId: m.id,
+      cityId: m.cityId,
+      // Building/complex name — the app fills this into the building field on selection.
+      complex: m.complex,
+      lane1: m.lane1,
+      lane2: m.lane2,
+      area: m.area,
+      suburb: m.suburb,
+      pincode: m.pincode,
+      latitude: m.latitude ? Number(m.latitude) : null,
+      longitude: m.longitude ? Number(m.longitude) : null,
+      city: m.city.name,
+      state: m.city.state,
     })),
   };
+}
+
+// ── Address Master: geo lookup + submission queue ────────────
+const EARTH_RADIUS_KM = 6371;
+
+export interface NearbyMaster {
+  masterId: number;
+  cityId: number;
+  lane1: string | null;
+  lane2: string | null;
+  area: string | null;
+  suburb: string | null;
+  pincode: string | null;
+  city: string;
+  state: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  distanceKm: number;
+}
+
+/**
+ * Maps a GPS pin to the nearest APPROVED Address Master localities within `radiusKm`
+ * (default 2 km), nearest first. Uses a Haversine raw query with a bounding-box pre-filter
+ * so it works on plain PostgreSQL (no PostGIS).
+ */
+export async function findNearbyMaster(
+  lat: number,
+  lng: number,
+  radiusKm = 2,
+): Promise<NearbyMaster[]> {
+  // Bounding box to let the planner use the lat/lng before computing Haversine.
+  const latDelta = radiusKm / 111.32; // ~km per degree latitude
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const lngDelta = radiusKm / (111.32 * (Math.abs(cosLat) < 1e-6 ? 1e-6 : cosLat));
+
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: number;
+      city_id: number;
+      lane1: string | null;
+      lane2: string | null;
+      area: string | null;
+      suburb: string | null;
+      pincode: string | null;
+      latitude: string | null;
+      longitude: string | null;
+      city_name: string;
+      state: string | null;
+      distance_km: number;
+    }>
+  >`
+    SELECT * FROM (
+      SELECT m.id, m.city_id, m.lane1, m.lane2, m.area, m.suburb, m.pincode,
+             m.latitude, m.longitude, c.name AS city_name, c.state,
+             ${EARTH_RADIUS_KM} * 2 * ASIN(SQRT(
+               POWER(SIN(RADIANS(CAST(m.latitude AS DOUBLE PRECISION) - ${lat}) / 2), 2) +
+               COS(RADIANS(${lat})) * COS(RADIANS(CAST(m.latitude AS DOUBLE PRECISION))) *
+               POWER(SIN(RADIANS(CAST(m.longitude AS DOUBLE PRECISION) - ${lng}) / 2), 2)
+             )) AS distance_km
+      FROM address_master m
+      JOIN cities c ON c.id = m.city_id
+      WHERE m.status = 'approved'
+        AND m.latitude IS NOT NULL AND m.longitude IS NOT NULL
+        AND CAST(m.latitude AS DOUBLE PRECISION) BETWEEN ${lat - latDelta} AND ${lat + latDelta}
+        AND CAST(m.longitude AS DOUBLE PRECISION) BETWEEN ${lng - lngDelta} AND ${lng + lngDelta}
+    ) sub
+    WHERE sub.distance_km <= ${radiusKm}
+    ORDER BY sub.distance_km ASC
+    LIMIT 5
+  `;
+
+  return rows.map((r) => ({
+    masterId: r.id,
+    cityId: r.city_id,
+    lane1: r.lane1,
+    lane2: r.lane2,
+    area: r.area,
+    suburb: r.suburb,
+    pincode: r.pincode,
+    city: r.city_name,
+    state: r.state,
+    latitude: r.latitude != null ? Number(r.latitude) : null,
+    longitude: r.longitude != null ? Number(r.longitude) : null,
+    distanceKm: Number(r.distance_km),
+  }));
+}
+
+interface MasterSubmission {
+  cityId: number;
+  lane1?: string;
+  lane2?: string;
+  area?: string;
+  suburb?: string;
+  pincode?: string;
+  latitude?: number;
+  longitude?: number;
+  userId?: number;
+}
+
+/**
+ * Reuses an existing Address Master row that already covers this locality (whether it's
+ * approved OR still pending), otherwise queues a new PENDING entry for admin approval.
+ * Pending entries are not suggested/autofilled until approved. De-duplication is by:
+ *   (a) a nearby APPROVED entry within ~0.3 km (same city), or
+ *   (b) a case-insensitive match on the full locality key
+ *       (lane1 + lane2 + area + suburb + pincode) in the same city, ANY status.
+ * This guarantees only genuinely-new localities are ever inserted — identical or
+ * same-locality submissions (regardless of letter-casing or trailing spaces) reuse the
+ * existing row instead of creating a duplicate. Returns the matched/created master, or
+ * null when there isn't enough locality information to record.
+ */
+export async function upsertMasterFromSubmission(input: MasterSubmission) {
+  const norm = (s?: string) => s?.trim() || undefined;
+  const lane1 = norm(input.lane1);
+  const lane2 = norm(input.lane2);
+  const area = norm(input.area);
+  const suburb = norm(input.suburb);
+  const pincode = norm(input.pincode);
+
+  // Nothing meaningful to record as a locality.
+  if (!lane1 && !lane2 && !area && !suburb) return null;
+
+  // (a) Geographic match: an approved locality within ~0.3 km is the same place.
+  if (input.latitude != null && input.longitude != null) {
+    const near = await findNearbyMaster(input.latitude, input.longitude, 0.3);
+    const sameCity = near.find((n) => n.cityId === input.cityId);
+    if (sameCity) return prisma.addressMaster.findUnique({ where: { id: sameCity.masterId } });
+  }
+
+  // (b) Attribute match on the full locality key, case-insensitive, across ANY status.
+  // A field absent in the submission must match a NULL value in the row.
+  const eq = (v?: string) => (v == null ? null : { equals: v, mode: 'insensitive' as const });
+  const existing = await prisma.addressMaster.findFirst({
+    where: {
+      cityId: input.cityId,
+      lane1: eq(lane1),
+      lane2: eq(lane2),
+      area: eq(area),
+      suburb: eq(suburb),
+      pincode: eq(pincode),
+    },
+  });
+  if (existing) return existing;
+
+  // (c) Genuinely new locality → queue as pending for admin approval.
+  return prisma.addressMaster.create({
+    data: {
+      cityId: input.cityId,
+      lane1,
+      lane2,
+      area,
+      suburb,
+      pincode,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      status: 'pending',
+      source: 'user',
+      submittedBy: input.userId,
+    },
+  });
 }
 
 /** Admin: list address-proof documents for review. */
@@ -184,62 +359,129 @@ export async function reviewAddressDoc(docId: number, status: 'approved' | 'reje
   return doc;
 }
 
-/** Admin "Address Capture" listing — addresses with their Active/Inactive flag. */
-export async function listAddresses(
-  params: PaginationParams & { q?: string; status?: string },
-) {
-  const where: Record<string, unknown> = {};
-  if (params.q) {
-    where.OR = [
-      { fullAddress: { contains: params.q, mode: 'insensitive' } },
-      { apartment: { contains: params.q, mode: 'insensitive' } },
-      { area: { areaName: { contains: params.q, mode: 'insensitive' } } },
-      { area: { pincode: { contains: params.q, mode: 'insensitive' } } },
-      { profiles: { some: { name: { contains: params.q, mode: 'insensitive' } } } },
-    ];
-  }
-  if (params.status === 'active') where.isActive = true;
-  else if (params.status === 'inactive') where.isActive = false;
+// ── Admin: Address Master management ─────────────────────────
 
-  const [rows, total] = await Promise.all([
-    prisma.address.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      ...toPrismaPagination(params),
-      include: {
-        area: { include: { city: { select: { name: true, state: true } } } },
-        profiles: { select: { id: true, name: true, user: { select: { id: true, mobile: true } } } },
-      },
-    }),
-    prisma.address.count({ where }),
-  ]);
-
-  const items = rows.map((a) => {
-    const owner = a.profiles[0];
-    return {
-      id: a.id,
-      userName: owner?.name ?? '—',
-      userId: owner?.user.id ?? null,
-      mobile: owner?.user.mobile ?? null,
-      fullAddress: a.fullAddress,
-      areaName: a.area.areaName,
-      pincode: a.area.pincode,
-      city: a.area.city.name,
-      isActive: a.isActive,
-      createdAt: a.createdAt,
-    };
-  });
-
-  return { items, meta: buildMeta(params.page, params.pageSize, total) };
+function masterToItem(m: {
+  id: number;
+  complex: string | null;
+  lane1: string | null;
+  lane2: string | null;
+  area: string | null;
+  suburb: string | null;
+  pincode: string | null;
+  latitude: unknown;
+  longitude: unknown;
+  status: string;
+  source: string;
+  createdAt: Date;
+  city: { name: string; state: string | null };
+}) {
+  return {
+    id: m.id,
+    complex: m.complex,
+    lane1: m.lane1,
+    lane2: m.lane2,
+    area: m.area,
+    suburb: m.suburb,
+    pincode: m.pincode,
+    latitude: m.latitude != null ? Number(m.latitude) : null,
+    longitude: m.longitude != null ? Number(m.longitude) : null,
+    status: m.status,
+    source: m.source,
+    city: m.city.name,
+    state: m.city.state,
+    createdAt: m.createdAt,
+  };
 }
 
-/** Toggle an address Active/Inactive. */
-export async function setAddressActive(id: number, isActive: boolean) {
-  return prisma.address.update({
+/**
+ * Admin "Address Master" listing — deduped localities with their approval status.
+ * Intentionally exposes NO user / building / flat information.
+ */
+export async function listMaster(params: PaginationParams & { q?: string; status?: string }) {
+  const where: Record<string, unknown> = {};
+  if (params.status && params.status !== 'all') where.status = params.status;
+  if (params.q) {
+    where.OR = [
+      { complex: { contains: params.q, mode: 'insensitive' } },
+      { lane1: { contains: params.q, mode: 'insensitive' } },
+      { lane2: { contains: params.q, mode: 'insensitive' } },
+      { area: { contains: params.q, mode: 'insensitive' } },
+      { suburb: { contains: params.q, mode: 'insensitive' } },
+      { pincode: { contains: params.q, mode: 'insensitive' } },
+      { city: { name: { contains: params.q, mode: 'insensitive' } } },
+    ];
+  }
+
+  const [rows, total] = await Promise.all([
+    prisma.addressMaster.findMany({
+      where,
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+      ...toPrismaPagination(params),
+      include: { city: { select: { name: true, state: true } } },
+    }),
+    prisma.addressMaster.count({ where }),
+  ]);
+
+  return { items: rows.map(masterToItem), meta: buildMeta(params.page, params.pageSize, total) };
+}
+
+/** Approve / reject a pending (or any) Address Master locality. */
+export async function reviewMaster(id: number, status: 'approved' | 'rejected', adminId: number) {
+  return prisma.addressMaster.update({
     where: { id },
-    data: { isActive },
-    select: { id: true, isActive: true },
+    data: { status, reviewedBy: adminId, reviewedAt: new Date() },
+    select: { id: true, status: true },
   });
+}
+
+/** Admin-created master locality (created already approved). */
+export async function createMaster(input: CreateMasterInput, adminId: number) {
+  const city = await prisma.city.findUnique({ where: { id: input.cityId } });
+  if (!city) throw ApiError.badRequest('Invalid cityId');
+  const created = await prisma.addressMaster.create({
+    data: {
+      cityId: input.cityId,
+      complex: input.complex?.trim() || undefined,
+      lane1: input.lane1?.trim() || undefined,
+      lane2: input.lane2?.trim() || undefined,
+      area: input.area?.trim() || undefined,
+      suburb: input.suburb?.trim() || undefined,
+      pincode: input.pincode?.trim() || undefined,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      status: 'approved',
+      source: 'admin',
+      reviewedBy: adminId,
+      reviewedAt: new Date(),
+    },
+    include: { city: { select: { name: true, state: true } } },
+  });
+  return masterToItem(created);
+}
+
+/** Edit a master locality's fields. */
+export async function updateMaster(id: number, input: UpdateMasterInput) {
+  if (input.cityId) {
+    const city = await prisma.city.findUnique({ where: { id: input.cityId } });
+    if (!city) throw ApiError.badRequest('Invalid cityId');
+  }
+  const updated = await prisma.addressMaster.update({
+    where: { id },
+    data: {
+      cityId: input.cityId,
+      complex: input.complex,
+      lane1: input.lane1,
+      lane2: input.lane2,
+      area: input.area,
+      suburb: input.suburb,
+      pincode: input.pincode,
+      latitude: input.latitude,
+      longitude: input.longitude,
+    },
+    include: { city: { select: { name: true, state: true } } },
+  });
+  return masterToItem(updated);
 }
 
 // ── Per-city address-form configuration (PRD) ────────────────
@@ -300,9 +542,10 @@ export async function saveCityAddressFields(cityId: number, fields: AddressField
 }
 
 /**
- * Bulk-import addresses from a parsed spreadsheet. Each row maps the source-sheet
- * headers (Complex name / Lane 1 / Lane 2 / Area / Suburb / City / Pincode) to
- * City → Area(locality) → Address, reusing the directory seed shape.
+ * Bulk-import localities into the Address Master from a parsed spreadsheet. Each row maps
+ * the source-sheet headers (Lane 1 / Lane 2 / Area / Suburb / City / Pincode) to an APPROVED
+ * master locality. The building/complex-name column is intentionally ignored — the master
+ * never stores buildings. Rows are deduped by (city, lane1, lane2, area).
  */
 export async function importAddresses(
   rows: Array<Record<string, unknown>>,
@@ -322,25 +565,25 @@ export async function importAddresses(
   };
 
   const cityCache = new Map<string, number>();
-  const areaCache = new Map<string, number>();
+  const seen = new Set<string>();
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const complex = pick(r, ['complex name', 'complex', 'apartment', 'building']);
     const lane1 = pick(r, ['lane 1', 'lane1']);
-    const locality = pick(r, ['lane 2', 'lane2', 'locality']);
+    const lane2 = pick(r, ['lane 2', 'lane2', 'locality']);
     const area = pick(r, ['area']);
     const suburb = pick(r, ['suburb']);
     const cityName = pick(r, ['city']);
     const pincode = pick(r, ['pincode', 'pin code', 'zip']);
 
-    if (!cityName || !complex) {
+    // Need a city and at least one locality field to form a master entry.
+    if (!cityName || (!lane1 && !lane2 && !area && !suburb)) {
       skipped++;
       continue;
     }
 
     try {
-      // City
       let cityId = cityCache.get(cityName.toLowerCase());
       if (!cityId) {
         const existing = await prisma.city.findFirst({ where: { name: cityName } });
@@ -348,33 +591,37 @@ export async function importAddresses(
         cityCache.set(cityName.toLowerCase(), cityId);
       }
 
-      // Area (locality preferred, else the Area column, else "General")
-      const areaName = locality || area || 'General';
-      const areaKey = `${cityId}|${areaName.toLowerCase()}|${suburb.toLowerCase()}`;
-      let areaId = areaCache.get(areaKey);
-      if (!areaId) {
-        const existing = await prisma.area.findFirst({
-          where: { cityId, areaName, suburb: suburb || null },
-        });
-        areaId =
-          existing?.id ??
-          (await prisma.area.create({
-            data: { cityId, areaName, suburb: suburb || undefined, pincode: pincode || undefined },
-          })).id;
-        areaCache.set(areaKey, areaId);
+      const dedupeKey = `${cityId}|${complex.toLowerCase()}|${lane1.toLowerCase()}|${lane2.toLowerCase()}`;
+      if (seen.has(dedupeKey)) {
+        skipped++;
+        continue;
+      }
+      seen.add(dedupeKey);
+
+      const existing = await prisma.addressMaster.findFirst({
+        where: {
+          cityId,
+          complex: complex || null,
+          lane1: lane1 || null,
+          lane2: lane2 || null,
+        },
+      });
+      if (existing) {
+        skipped++;
+        continue;
       }
 
-      const fullAddress = [complex, lane1, locality, area, suburb, cityName, pincode]
-        .filter(Boolean)
-        .join(', ');
-
-      await prisma.address.create({
+      await prisma.addressMaster.create({
         data: {
-          areaId,
-          apartment: complex,
+          cityId,
+          complex: complex || undefined,
           lane1: lane1 || undefined,
-          lane2: locality || undefined,
-          fullAddress,
+          lane2: lane2 || undefined,
+          area: area || undefined,
+          suburb: suburb || undefined,
+          pincode: pincode || undefined,
+          status: 'approved',
+          source: 'import',
         },
       });
       created++;

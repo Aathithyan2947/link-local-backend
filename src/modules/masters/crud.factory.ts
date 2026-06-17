@@ -7,7 +7,10 @@ import { ok, paginated } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, paginationSchema, toPrismaPagination } from '../../utils/pagination.js';
 import { validate, getValidatedQuery } from '../../middleware/validate.js';
-import { authenticate } from '../../middleware/auth.js';
+import { authenticate, requireAdminRole } from '../../middleware/auth.js';
+
+// Master data is structural config — only super admins may change it.
+const writeGuard = [authenticate('admin'), requireAdminRole('super_admin')];
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -102,10 +105,10 @@ export function crudRouter(opts: CrudOptions): Router {
     }),
   );
 
-  // CREATE (admin only)
+  // CREATE (super admin only)
   router.post(
     '/',
-    authenticate('admin'),
+    ...writeGuard,
     validate({ body: opts.createSchema }),
     asyncHandler(async (req, res) => {
       const item = await delegate.create({ data: req.body, include: opts.include });
@@ -113,10 +116,10 @@ export function crudRouter(opts: CrudOptions): Router {
     }),
   );
 
-  // UPDATE (admin only)
+  // UPDATE (super admin only)
   router.patch(
     '/:id',
-    authenticate('admin'),
+    ...writeGuard,
     validate({ body: opts.updateSchema }),
     asyncHandler(async (req, res) => {
       const item = await delegate.update({
@@ -128,10 +131,10 @@ export function crudRouter(opts: CrudOptions): Router {
     }),
   );
 
-  // DELETE (admin only)
+  // DELETE (super admin only)
   router.delete(
     '/:id',
-    authenticate('admin'),
+    ...writeGuard,
     asyncHandler(async (req, res) => {
       await delegate.delete({ where: { id: Number(req.params.id) } });
       ok(res, { id: Number(req.params.id), deleted: true });

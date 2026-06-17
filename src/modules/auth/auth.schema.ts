@@ -1,11 +1,22 @@
 import { z } from 'zod';
 
-const passwordField = z.string().min(6, 'Password must be at least 6 characters').max(72);
+// Strong password policy: 8+ chars with at least one uppercase, one lowercase, one number
+// and one special character.
+const passwordField = z
+  .string()
+  .min(8, 'Password must be at least 8 characters')
+  .max(72)
+  .regex(/[A-Z]/, 'Password must include an uppercase letter')
+  .regex(/[a-z]/, 'Password must include a lowercase letter')
+  .regex(/[0-9]/, 'Password must include a number')
+  .regex(/[^A-Za-z0-9]/, 'Password must include a special character');
+
+const emailField = z.string().email('Please enter a valid email address');
 
 export const registerSchema = z
   .object({
     name: z.string().min(1).max(120),
-    email: z.string().email().optional(),
+    email: emailField.optional(),
     mobile: z
       .string()
       .regex(/^\+?[0-9]{7,15}$/, 'Invalid mobile number')
@@ -22,7 +33,8 @@ export const registerSchema = z
 
 export const loginSchema = z.object({
   identifier: z.string().min(1, 'Email or mobile is required'),
-  password: passwordField,
+  // Login only checks presence — the strong-password policy applies at registration.
+  password: z.string().min(1, 'Password is required'),
 });
 
 export const adminLoginSchema = z.object({
@@ -39,7 +51,7 @@ const mobileField = z.string().regex(/^\+?[0-9]{7,15}$/, 'Invalid mobile number'
 export const otpRequestSchema = z
   .object({
     mobile: mobileField.optional(),
-    email: z.string().email().optional(),
+    email: emailField.optional(),
     purpose: z.enum(['registration', 'login']).default('registration'),
     name: z.string().min(1).max(100).optional(),
     userType: z.enum(['resident', 'service_provider', 'business_listing']).optional(),
@@ -49,7 +61,7 @@ export const otpRequestSchema = z
 export const otpVerifySchema = z
   .object({
     mobile: mobileField.optional(),
-    email: z.string().email().optional(),
+    email: emailField.optional(),
     otp: z.string().length(6),
     purpose: z.enum(['registration', 'login']).default('registration'),
     name: z.string().min(1).max(100).optional(),

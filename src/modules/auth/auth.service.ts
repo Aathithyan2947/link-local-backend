@@ -142,6 +142,13 @@ export async function requestOtp(input: OtpRequestInput) {
   if (purpose === 'login' && !existing) {
     throw ApiError.notFound('No account found. Please sign up first.');
   }
+  // Registering with an already-used mobile/email must NOT silently log into the existing
+  // account (which would ignore the new name). Stop here and ask them to log in instead.
+  if (purpose === 'registration' && existing) {
+    throw ApiError.conflict(
+      `An account with this ${mobile ? 'mobile number' : 'email'} already exists. Please log in.`,
+    );
+  }
 
   const otpCode = genOtp();
   await prisma.otpToken.create({
@@ -184,6 +191,13 @@ export async function verifyOtp(input: OtpVerifyInput) {
   let user = await prisma.user.findFirst({
     where: { OR: [mobile ? { mobile } : undefined, email ? { email } : undefined].filter(Boolean) as object[] },
   });
+
+  // Defense-in-depth: never let a registration verify into an existing account.
+  if (user && purpose === 'registration') {
+    throw ApiError.conflict(
+      `An account with this ${mobile ? 'mobile number' : 'email'} already exists. Please log in.`,
+    );
+  }
 
   if (!user) {
     if (purpose === 'login') throw ApiError.notFound('No account found');

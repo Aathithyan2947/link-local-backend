@@ -191,14 +191,26 @@ export async function setServiceTypes(userId: number, input: z.infer<typeof serv
   const profile = await requireProfile(userId);
   const ids = [...input.subcategoryIds];
 
+  // Lazily resolve a fallback "Other" category for custom services without a categoryId.
+  let otherCategoryId: number | undefined;
+  const getOtherCategory = async () => {
+    if (otherCategoryId) return otherCategoryId;
+    const cat =
+      (await prisma.serviceCategory.findFirst({ where: { name: 'Other' } })) ??
+      (await prisma.serviceCategory.create({ data: { name: 'Other' } }));
+    otherCategoryId = cat.id;
+    return otherCategoryId;
+  };
+
   for (const custom of input.customServices ?? []) {
+    const categoryId = custom.categoryId ?? (await getOtherCategory());
     const existing = await prisma.serviceSubcategory.findFirst({
-      where: { categoryId: custom.categoryId, name: custom.name },
+      where: { categoryId, name: custom.name },
     });
     const sub =
       existing ??
       (await prisma.serviceSubcategory.create({
-        data: { categoryId: custom.categoryId, name: custom.name, isActive: false }, // pending admin approval
+        data: { categoryId, name: custom.name, isActive: false }, // pending admin approval
       }));
     ids.push(sub.id);
   }

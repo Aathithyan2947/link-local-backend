@@ -13,9 +13,12 @@ import { recomputeCompletion } from '../profiles/profiles.service.js';
 import { writeAudit } from '../admin/audit.js';
 import {
   createAddressSchema,
-  listAddressesSchema,
+  nearbySchema,
+  listMasterSchema,
+  reviewMasterSchema,
+  createMasterSchema,
+  updateMasterSchema,
   listAddressDocsSchema,
-  setActiveSchema,
   cityFieldsSchema,
 } from './addresses.schema.js';
 
@@ -32,6 +35,17 @@ addressesRouter.get(
   asyncHandler(async (req, res) => {
     const { q } = getValidatedQuery<{ q: string }>(req);
     ok(res, await service.searchDirectory(q));
+  }),
+);
+
+// Nearby Address Master lookup — maps the user's GPS pin to approved localities within 2 km.
+addressesRouter.get(
+  '/nearby',
+  authenticate('user'),
+  validate({ query: nearbySchema }),
+  asyncHandler(async (req, res) => {
+    const { lat, lng, radiusKm } = getValidatedQuery<{ lat: number; lng: number; radiusKm?: number }>(req);
+    ok(res, await service.findNearbyMaster(lat, lng, radiusKm ?? 2));
   }),
 );
 
@@ -80,11 +94,13 @@ addressesRouter.post(
   }),
 );
 
-// ── Admin "Address Capture" ──────────────────────────────────
+// ── Admin "Address Master" ───────────────────────────────────
+// Deduped localities (lane1/lane2/area/suburb/city/pincode) with approval status.
+// Exposes no user/building/flat data.
 addressesRouter.get(
-  '/admin/list',
+  '/admin/master',
   authenticate('admin'),
-  validate({ query: listAddressesSchema }),
+  validate({ query: listMasterSchema }),
   asyncHandler(async (req, res) => {
     const query = getValidatedQuery<{
       page: number;
@@ -92,24 +108,48 @@ addressesRouter.get(
       q?: string;
       status?: string;
     }>(req);
-    const { items, meta } = await service.listAddresses(query);
+    const { items, meta } = await service.listMaster(query);
     paginated(res, items, meta);
   }),
 );
 
-// Toggle an address Active/Inactive
-addressesRouter.patch(
-  '/admin/:id',
+// Create a master locality manually (admin-created → approved)
+addressesRouter.post(
+  '/admin/master',
   authenticate('admin'),
-  validate({ body: setActiveSchema }),
+  validate({ body: createMasterSchema }),
   asyncHandler(async (req, res) => {
-    const updated = await service.setAddressActive(Number(req.params.id), req.body.isActive);
-    await writeAudit(req.auth!.sub, updated.isActive ? 'activate_address' : 'deactivate_address', 'address', updated.id);
+    const created = await service.createMaster(req.body, req.auth!.sub);
+    await writeAudit(req.auth!.sub, 'create_address_master', 'address_master', created.id);
+    ok(res, created, 201);
+  }),
+);
+
+// Edit a master locality's fields
+addressesRouter.patch(
+  '/admin/master/:id',
+  authenticate('admin'),
+  validate({ body: updateMasterSchema }),
+  asyncHandler(async (req, res) => {
+    const updated = await service.updateMaster(Number(req.params.id), req.body);
+    await writeAudit(req.auth!.sub, 'update_address_master', 'address_master', updated.id);
     ok(res, updated);
   }),
 );
 
-// Bulk import addresses from an Excel/CSV sheet
+// Approve / reject a pending master locality
+addressesRouter.patch(
+  '/admin/master/:id/review',
+  authenticate('admin'),
+  validate({ body: reviewMasterSchema }),
+  asyncHandler(async (req, res) => {
+    const updated = await service.reviewMaster(Number(req.params.id), req.body.status, req.auth!.sub);
+    await writeAudit(req.auth!.sub, `${req.body.status}_address_master`, 'address_master', updated.id);
+    ok(res, updated);
+  }),
+);
+
+// Bulk import localities into the master from an Excel/CSV sheet
 addressesRouter.post(
   '/admin/import',
   authenticate('admin'),

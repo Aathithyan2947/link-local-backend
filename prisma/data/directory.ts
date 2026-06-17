@@ -33,6 +33,41 @@ export const localityPincodes: Record<string, string> = {
   'Bhawani Nagar': '400615',
 };
 
+/**
+ * Centre coordinates per locality (Thane / Ghodbunder Road corridor), used to seed the
+ * Address Master with a representative lat/lng so the 2 km-radius autofill works.
+ * Geocoded via OpenStreetMap (Nominatim), bounded to the Ghodbunder Road corridor.
+ * Two entries are set by hand: Bhayandarpada had no OSM node, and "Bhawani Nagar"
+ * resolves to a different Wagle-Estate locality in OSM — both are pinned to their real
+ * position in the Anand Nagar / Gaimukh cluster of this directory.
+ */
+export const localityCoords: Record<string, { lat: number; lng: number }> = {
+  Kasarvadavali: { lat: 19.2704, lng: 72.9691 },
+  'Anand Nagar': { lat: 19.2664, lng: 72.9681 },
+  Waghbil: { lat: 19.2660, lng: 72.9848 },
+  Kavesar: { lat: 19.2623, lng: 72.9722 },
+  Brahmand: { lat: 19.2470, lng: 72.9818 },
+  Patlipada: { lat: 19.2494, lng: 72.9761 },
+  Dhokali: { lat: 19.2256, lng: 72.9845 },
+  Owale: { lat: 19.2758, lng: 72.9612 },
+  'Hiranandani Estate': { lat: 19.2570, lng: 72.9839 },
+  Kolshet: { lat: 19.2389, lng: 72.9933 },
+  Manpada: { lat: 19.2314, lng: 72.9738 },
+  'Chitalsar Manpada': { lat: 19.2314, lng: 72.9763 },
+  Chitalsar: { lat: 19.2314, lng: 72.9763 },
+  Majiwada: { lat: 19.2130, lng: 72.9785 },
+  Gaimukh: { lat: 19.2858, lng: 72.9360 },
+  Mogharpada: { lat: 19.2813, lng: 72.9697 },
+  Bhayandarpada: { lat: 19.2835, lng: 72.9520 }, // hand-pinned: near Gaimukh/Mogharpada
+  Kapurbawdi: { lat: 19.2175, lng: 72.9790 },
+  'Vijay Nagari': { lat: 19.2548, lng: 72.9747 },
+  Dongripada: { lat: 19.2488, lng: 72.9747 },
+  'Bhawani Nagar': { lat: 19.2690, lng: 72.9670 }, // hand-pinned: Anand Nagar cluster
+};
+
+/** Fallback coordinate (Kasarvadavali centre) for localities without an explicit entry. */
+export const DIRECTORY_DEFAULT_COORD = { lat: 19.2704, lng: 72.9691 };
+
 export interface ComplexSeed {
   complex: string;
   lane1: string;

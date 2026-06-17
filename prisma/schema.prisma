@@ -33,6 +33,7 @@ model City {
   cityMemberships   UserCityMembership[]
   referrals         Referral[]
   addressFields     CityAddressField[]
+  addressMasters    AddressMaster[]
 
   @@map("cities")
 }
@@ -129,6 +130,7 @@ model EducationMaster {
   schoolCity      String? @map("school_city")
   collegeName     String? @map("college_name")
   collegeCity     String? @map("college_city")
+  university      String?
   postGradCollege String? @map("post_grad_college")
   postGradCity    String? @map("post_grad_city")
 
@@ -449,6 +451,36 @@ model AddressVerificationDoc {
   reviewer Admin?  @relation(fields: [reviewedBy], references: [id])
 
   @@map("address_verification_docs")
+}
+
+/// Address Master — the curated, deduplicated set of localities that powers the app's
+/// autocomplete and 2 km-radius autofill. This is the source of truth for address
+/// SUGGESTIONS only: it holds lane1 / lane2 / area / suburb / city / pincode + a
+/// representative lat/lng, and intentionally NEVER stores per-user building, flat, or
+/// plot numbers (those stay private on `Address`). New localities a user introduces are
+/// queued as `pending` and only become suggestions to others once an admin approves them.
+model AddressMaster {
+  id          Int       @id @default(autoincrement())
+  cityId      Int       @map("city_id")
+  complex     String? // building / complex name (from the curated directory; used for search autofill — never a user's flat/plot)
+  lane1       String?
+  lane2       String?
+  area        String? // areaName / locality
+  suburb      String?
+  pincode     String?
+  latitude    Decimal?  @db.Decimal(10, 7)
+  longitude   Decimal?  @db.Decimal(10, 7)
+  status      String    @default("pending") // pending | approved | rejected
+  source      String    @default("user") // user | admin | import
+  submittedBy Int?      @map("submitted_by")
+  reviewedBy  Int?      @map("reviewed_by")
+  reviewedAt  DateTime? @map("reviewed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  city City @relation(fields: [cityId], references: [id])
+
+  @@index([cityId, status])
+  @@map("address_master")
 }
 
 model VisibilityCircle {
