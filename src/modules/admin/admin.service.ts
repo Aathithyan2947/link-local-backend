@@ -38,7 +38,10 @@ export async function listMembers(
             name: true,
             photoUrl: true,
             address: {
-              select: { area: { select: { areaName: true, city: { select: { name: true } } } } },
+              select: {
+                area: { select: { areaName: true, city: { select: { name: true } } } },
+                verificationDocs: { select: { status: true } },
+              },
             },
           },
         },
@@ -47,7 +50,96 @@ export async function listMembers(
     prisma.user.count({ where }),
   ]);
 
-  return { items: rows, meta: buildMeta(params.page, params.pageSize, total) };
+  // Tri-state for the Members tab. `isVerified` is canonical (set by approving an address proof,
+  // or a manual admin override); when not verified, fall back to the latest proof outcome so a
+  // rejection shows as "Rejected" and a fresh re-upload shows as "Pending".
+  const items = rows.map((u) => {
+    const statuses = (u.profile?.address?.verificationDocs ?? []).map((d) => d.status);
+    const verificationStatus = u.isVerified
+      ? 'verified'
+      : statuses.includes('pending')
+        ? 'pending'
+        : statuses.includes('rejected')
+          ? 'rejected'
+          : 'none';
+    return { ...u, verificationStatus };
+  });
+
+  return { items, meta: buildMeta(params.page, params.pageSize, total) };
+}
+
+/** Full detail for a single member — powers the individual user page. */
+export async function getMemberDetail(userId: number) {
+  const u = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      mobile: true,
+      userType: true,
+      isVerified: true,
+      isActive: true,
+      isBlocked: true,
+      referralCode: true,
+      createdAt: true,
+      profile: {
+        select: {
+          name: true,
+          photoUrl: true,
+          aboutMe: true,
+          gender: true,
+          completion: { select: { completionPercent: true } },
+          address: {
+            select: {
+              fullAddress: true,
+              area: { select: { areaName: true, city: { select: { name: true, state: true } } } },
+              verificationDocs: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 },
+            },
+          },
+          educations: { include: { educationMaster: true } },
+          professions: { include: { professionMaster: true } },
+          hobbies: { include: { hobbyMaster: true } },
+          contactDetails: true,
+          serviceTypes: { include: { subcategory: { include: { category: true } } } },
+        },
+      },
+    },
+  });
+  if (!u) throw ApiError.notFound('Member not found');
+  const p = u.profile;
+  return {
+    id: u.id,
+    name: p?.name ?? '—',
+    email: u.email,
+    mobile: u.mobile,
+    userType: u.userType,
+    isVerified: u.isVerified,
+    isActive: u.isActive,
+    isBlocked: u.isBlocked,
+    referralCode: u.referralCode,
+    createdAt: u.createdAt,
+    photoUrl: p?.photoUrl ?? null,
+    aboutMe: p?.aboutMe ?? null,
+    gender: p?.gender ?? null,
+    completionPercent: p?.completion?.completionPercent ?? 0,
+    fullAddress: p?.address?.fullAddress ?? null,
+    area: p?.address?.area?.areaName ?? null,
+    city: p?.address?.area?.city?.name ?? null,
+    state: p?.address?.area?.city?.state ?? null,
+    docStatus: p?.address?.verificationDocs[0]?.status ?? 'none',
+    educations: (p?.educations ?? []).map((e) =>
+      [e.degree ?? e.educationMaster?.degree, e.collegeName ?? e.educationMaster?.collegeName, e.schoolName ?? e.educationMaster?.schoolName]
+        .filter(Boolean)
+        .join(' · ') || 'Education',
+    ),
+    professions: (p?.professions ?? []).map((pr) => ({
+      category: pr.professionMaster?.category ?? '—',
+      company: pr.companyOrDetail ?? null,
+    })),
+    hobbies: (p?.hobbies ?? []).map((h) => h.hobbyMaster?.name ?? h.customHobby).filter(Boolean),
+    contacts: (p?.contactDetails ?? []).map((c) => ({ type: c.contactType, value: c.value })),
+    services: (p?.serviceTypes ?? []).map((s) => s.subcategory?.name ?? '—'),
+  };
 }
 
 export async function setMemberStatus(userId: number, patch: { isActive?: boolean; isBlocked?: boolean; isVerified?: boolean }) {
@@ -61,8 +153,18 @@ export async function setMemberStatus(userId: number, patch: { isActive?: boolea
 // ── Profile verification queue ───────────────────────────────
 export async function listVerifications(params: PaginationParams & { status?: string }) {
   const where: Record<string, unknown> = {};
-  if (params.status === 'verified') where.isVerified = true;
-  else if (params.status === 'pending') where.isVerified = false;
+  if (params.status === 'verified') {
+    where.isVerified = true;
+  } else if (params.status === 'rejected') {
+    // Rejected and not since verified — so a reject visibly moves the member here.
+    where.isVerified = false;
+    where.profileVerifications = { some: { status: 'rejected' } };
+  } else {
+    // pending (default): unverified members who haven't been decided yet, so approving OR
+    // rejecting removes them from this queue.
+    where.isVerified = false;
+    where.profileVerifications = { none: {} };
+  }
 
   const [rows, total] = await Promise.all([
     prisma.user.findMany({
@@ -124,9 +226,12 @@ export async function reviewVerification(
       rejectionReason: status === 'rejected' ? rejectionReason : undefined,
     },
   });
-  if (status === 'approved') {
-    await prisma.user.update({ where: { id: userId }, data: { isVerified: true } });
-  }
+  // Reflect the decision on the member's flag both ways (approve verifies, reject un-verifies)
+  // so the Members tab never shows a stale "Verified".
+  await prisma.user.update({
+    where: { id: userId },
+    data: { isVerified: status === 'approved' },
+  });
   return { userId, status };
 }
 

@@ -50,6 +50,12 @@ async function main() {
     if (!exists) await prisma.cityAllowedDocType.create({ data: { cityId: city.id, docType } });
   }
 
+  // "Other" proof is enabled for EVERY city by default (and always requires admin verification).
+  for (const c of await prisma.city.findMany({ select: { id: true } })) {
+    const exists = await prisma.cityAllowedDocType.findFirst({ where: { cityId: c.id, docType: 'other' } });
+    if (!exists) await prisma.cityAllowedDocType.create({ data: { cityId: c.id, docType: 'other', isActive: true } });
+  }
+
   // ── Service categories + subcategories (from sheet) ────────
   const subcatByName = new Map<string, number>();
   for (const { category: catName, types } of serviceCategories) {
@@ -152,6 +158,7 @@ async function main() {
     ['friends_family', 'Friends & Family'],
     ['print_media', 'Print Media'],
     ['neighbourhood_poster', 'Neighbourhood Poster'],
+    ['user_id', 'Referred by a user'],
     ['other', 'Other'],
   ] as const) {
     const exists = await prisma.referralSource.findFirst({ where: { source } });

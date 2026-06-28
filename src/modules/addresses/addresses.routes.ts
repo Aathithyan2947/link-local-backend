@@ -85,9 +85,11 @@ addressesRouter.post(
   asyncHandler(async (req, res) => {
     if (!req.file) throw ApiError.badRequest('document file is required');
     const docType = (req.body.docType as string) || 'other';
+    const description = (req.body.description as string)?.trim() || undefined;
     const doc = await service.addVerificationDoc({
       userId: req.auth!.sub,
       docType,
+      description,
       docUrl: fileUrl(req.file.filename),
     });
     ok(res, doc, 201);

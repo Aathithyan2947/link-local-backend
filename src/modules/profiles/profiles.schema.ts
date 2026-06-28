@@ -19,6 +19,7 @@ export const educationSchema = z.object({
   schoolCity: z.string().optional(),
   collegeName: z.string().optional(),
   collegeCity: z.string().optional(),
+  university: z.string().optional(),
   postGradCollege: z.string().optional(),
   postGradCity: z.string().optional(),
 });
@@ -53,6 +54,12 @@ export const contactSchema = z.object({
   contactType: z.enum(['phone', 'whatsapp', 'email', 'other']),
   value: z.string().min(1),
   visibilityCircleId: z.number().int().optional(),
+});
+
+// SP answers to a subcategory's dynamic fields. `value` holds text, or an uploaded file URL
+// for 'file' fields (menu card / rate card).
+export const customFieldsSchema = z.object({
+  values: z.array(z.object({ fieldId: z.number().int(), value: z.string() })).default([]),
 });
 
 export const serviceTypesSchema = z.object({

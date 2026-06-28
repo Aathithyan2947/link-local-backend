@@ -36,6 +36,8 @@ interface CrudOptions {
   include?: any;
   /** When true, listing is public; otherwise it requires an authenticated principal. */
   publicRead?: boolean;
+  /** Runs after a row is created (e.g. seed default child rows for a new city). */
+  afterCreate?: (item: any) => Promise<void> | void;
 }
 
 const listQuerySchema = paginationSchema.extend({
@@ -78,11 +80,17 @@ export function crudRouter(opts: CrudOptions): Router {
     asyncHandler(async (req, res) => {
       const query = getValidatedQuery<z.infer<typeof listQuerySchema>>(req);
       const where = buildWhere(req);
+      // Always end on `id` as a stable tiebreaker so rows with equal sort values (e.g. a
+      // sortOrder of 0) keep a fixed order — otherwise editing a row makes Postgres return it
+      // last within its tie group, so the edited item appears to "jump to the bottom".
+      const orderBy = opts.defaultOrderBy
+        ? [...(Array.isArray(opts.defaultOrderBy) ? opts.defaultOrderBy : [opts.defaultOrderBy]), { id: 'asc' }]
+        : { id: 'asc' };
       const [items, total] = await Promise.all([
         delegate.findMany({
           where,
           include: opts.include,
-          orderBy: opts.defaultOrderBy ?? { id: 'asc' },
+          orderBy,
           ...toPrismaPagination(query),
         }),
         delegate.count({ where }),
@@ -112,6 +120,7 @@ export function crudRouter(opts: CrudOptions): Router {
     validate({ body: opts.createSchema }),
     asyncHandler(async (req, res) => {
       const item = await delegate.create({ data: req.body, include: opts.include });
+      if (opts.afterCreate) await opts.afterCreate(item);
       ok(res, item, 201);
     }),
   );

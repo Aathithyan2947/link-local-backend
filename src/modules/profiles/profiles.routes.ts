@@ -10,6 +10,7 @@ import { upload, fileUrl } from '../../middleware/upload.js';
 import * as service from './profiles.service.js';
 import {
   contactSchema,
+  customFieldsSchema,
   deliverySchema,
   educationSchema,
   familySchema,
@@ -47,6 +48,19 @@ profilesRouter.patch(
   auth,
   validate({ body: updateProfileSchema }),
   asyncHandler(async (req, res) => ok(res, await service.updateProfile(req.auth!.sub, req.body))),
+);
+
+// Referral capture (at address verification): how they heard about us + who referred them.
+profilesRouter.patch(
+  '/me/referral',
+  auth,
+  validate({
+    body: z.object({
+      referralCode: z.string().optional(),
+      referralSourceId: z.coerce.number().int().optional(),
+    }),
+  }),
+  asyncHandler(async (req, res) => ok(res, await service.setReferral(req.auth!.sub, req.body))),
 );
 
 profilesRouter.post(
@@ -109,6 +123,19 @@ profilesRouter.delete('/me/contacts/:id', auth, asyncHandler(async (req, res) =>
 
 // Service types (SP)
 profilesRouter.post('/me/service-types', auth, validate({ body: serviceTypesSchema }), asyncHandler(async (req, res) => ok(res, await service.setServiceTypes(req.auth!.sub, req.body))));
+
+// Dynamic subcategory fields (SP) — incl. file uploads like menu/rate cards.
+profilesRouter.get('/me/custom-fields', auth, asyncHandler(async (req, res) => ok(res, await service.getMyCustomFields(req.auth!.sub))));
+profilesRouter.put('/me/custom-fields', auth, validate({ body: customFieldsSchema }), asyncHandler(async (req, res) => ok(res, await service.saveCustomFields(req.auth!.sub, req.body.values))));
+profilesRouter.post(
+  '/me/custom-fields/upload',
+  auth,
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest('file is required');
+    ok(res, { url: fileUrl(req.file.filename) }, 201);
+  }),
+);
 
 // Products (SP)
 profilesRouter.post('/me/products', auth, validate({ body: productSchema }), asyncHandler(async (req, res) => ok(res, await service.addProduct(req.auth!.sub, req.body), 201)));

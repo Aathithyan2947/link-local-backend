@@ -133,6 +133,9 @@ model EducationMaster {
   university      String?
   postGradCollege String? @map("post_grad_college")
   postGradCity    String? @map("post_grad_city")
+  // Curated degree catalog. User-suggested "Other" degrees land as isActive=false (pending)
+  // and stay hidden from the app's picker until an admin approves them.
+  isActive        Boolean @default(true) @map("is_active")
 
   profileEducations ProfileEducation[]
 
@@ -142,10 +145,39 @@ model EducationMaster {
 model ProfessionMaster {
   id       Int    @id @default(autoincrement())
   category String // Salaried | Business | Freelancer | Consultant | Student | Retired | Advisor | On-Contract
+  // User-suggested "Other" professions land as isActive=false (pending) and stay hidden
+  // from the app's picker until an admin approves them.
+  isActive Boolean @default(true) @map("is_active")
 
   profileProfessions ProfileProfession[]
 
   @@map("profession_master")
+}
+
+// Curated school catalog (independent of degree/college). User-suggested "Other" schools
+// land as isActive=false (pending) until an admin approves them.
+model SchoolMaster {
+  id       Int     @id @default(autoincrement())
+  name     String
+  city     String?
+  isActive Boolean @default(true) @map("is_active")
+
+  profileEducations ProfileEducation[]
+
+  @@map("school_master")
+}
+
+// Curated college catalog (independent of degree/school). User-suggested "Other" colleges
+// land as isActive=false (pending) until an admin approves them.
+model CollegeMaster {
+  id       Int     @id @default(autoincrement())
+  name     String
+  city     String?
+  isActive Boolean @default(true) @map("is_active")
+
+  profileEducations ProfileEducation[]
+
+  @@map("college_master")
 }
 
 /// Admin-controlled hobbies list.
@@ -256,6 +288,8 @@ model CityAllowedDocType {
 
   city City @relation(fields: [cityId], references: [id])
 
+  // A document type may be allowed only once per city — no duplicates.
+  @@unique([cityId, docType])
   @@map("city_allowed_doc_types")
 }
 
@@ -440,6 +474,9 @@ model AddressVerificationDoc {
   addressId  Int       @map("address_id")
   cityId     Int       @map("city_id")
   docType    String    @map("doc_type")
+  // Optional member-entered title for the document — mainly to describe an "Other" proof so
+  // the admin knows what they're reviewing.
+  description String?  @map("description")
   docUrl     String    @map("doc_url")
   status     String? // pending | approved | rejected
   reviewedBy Int?      @map("reviewed_by")
@@ -627,9 +664,23 @@ model ProfileEducation {
   id                Int  @id @default(autoincrement())
   profileId         Int  @map("profile_id")
   educationMasterId Int? @map("education_master_id")
+  schoolMasterId    Int? @map("school_master_id")
+  collegeMasterId   Int? @map("college_master_id")
+  // Per-user education details. The shared masters (degree / school / college) are curated
+  // catalogs; a member's chosen names + cities are denormalized here for display.
+  degree          String?
+  schoolName      String? @map("school_name")
+  schoolCity      String? @map("school_city")
+  collegeName     String? @map("college_name")
+  collegeCity     String? @map("college_city")
+  university      String?
+  postGradCollege String? @map("post_grad_college")
+  postGradCity    String? @map("post_grad_city")
 
   profile         Profile          @relation(fields: [profileId], references: [id])
   educationMaster EducationMaster? @relation(fields: [educationMasterId], references: [id])
+  schoolMaster    SchoolMaster?    @relation(fields: [schoolMasterId], references: [id])
+  collegeMaster   CollegeMaster?   @relation(fields: [collegeMasterId], references: [id])
 
   @@map("profile_education")
 }

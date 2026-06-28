@@ -25,6 +25,15 @@ function generateReferralCode(name: string): string {
   return `${prefix}${randomBytes(3).toString('hex').toUpperCase()}`;
 }
 
+/** Resolves the referring member from a referral code. Throws if the code doesn't match anyone. */
+async function resolveReferrer(referralCode?: string): Promise<number | undefined> {
+  const code = referralCode?.trim();
+  if (!code) return undefined;
+  const referrer = await prisma.user.findUnique({ where: { referralCode: code } });
+  if (!referrer) throw ApiError.badRequest("That referral code isn't valid. Check the member ID and try again.");
+  return referrer.id;
+}
+
 const userPublicSelect = {
   id: true,
   mobile: true,
@@ -45,11 +54,7 @@ export async function register(input: RegisterInput) {
   });
   if (existing) throw ApiError.conflict('An account with this email or mobile already exists');
 
-  let referredBy: number | undefined;
-  if (referralCode) {
-    const referrer = await prisma.user.findUnique({ where: { referralCode } });
-    if (referrer) referredBy = referrer.id;
-  }
+  const referredBy = await resolveReferrer(referralCode);
 
   const passwordHash = await hashPassword(password);
 
@@ -173,7 +178,7 @@ export async function requestOtp(input: OtpRequestInput) {
 }
 
 export async function verifyOtp(input: OtpVerifyInput) {
-  const { mobile, email, otp, purpose, name, userType, referralCode } = input;
+  const { mobile, email, otp, purpose, name, userType, referralCode, referralSourceId } = input;
 
   const token = await prisma.otpToken.findFirst({
     where: {
@@ -201,11 +206,7 @@ export async function verifyOtp(input: OtpVerifyInput) {
 
   if (!user) {
     if (purpose === 'login') throw ApiError.notFound('No account found');
-    let referredBy: number | undefined;
-    if (referralCode) {
-      const referrer = await prisma.user.findUnique({ where: { referralCode } });
-      if (referrer) referredBy = referrer.id;
-    }
+    const referredBy = await resolveReferrer(referralCode);
     user = await prisma.user.create({
       data: {
         mobile,
@@ -214,6 +215,7 @@ export async function verifyOtp(input: OtpVerifyInput) {
         userType,
         isVerified: false,
         referredBy,
+        referralSourceId,
         referralCode: generateReferralCode(name ?? 'User'),
         profile: { create: { name: name ?? 'Member' } },
         stats: { create: {} },

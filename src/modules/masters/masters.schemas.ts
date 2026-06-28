@@ -30,7 +30,8 @@ export const serviceSubcategorySchema = z.object({
 export const subcategoryFieldSchema = z.object({
   subcategoryId: z.number().int(),
   fieldName: z.string().min(1),
-  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean']),
+  // 'file' lets a subcategory require an upload such as a menu card / rate card.
+  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file']),
   fieldOptions: z.string().optional(),
   isRequired: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
@@ -46,10 +47,24 @@ export const educationSchema = z.object({
   university: z.string().optional(),
   postGradCollege: z.string().optional(),
   postGradCity: z.string().optional(),
+  isActive: z.boolean().optional(),
 });
 
 export const professionSchema = z.object({
   category: z.string().min(1),
+  isActive: z.boolean().optional(),
+});
+
+export const schoolSchema = z.object({
+  name: z.string().min(1),
+  city: z.string().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export const collegeSchema = z.object({
+  name: z.string().min(1),
+  city: z.string().optional(),
+  isActive: z.boolean().optional(),
 });
 
 export const hobbySchema = z.object({
@@ -103,6 +118,8 @@ export const serviceSubcategoryUpdate = partial(serviceSubcategorySchema.shape);
 export const subcategoryFieldUpdate = partial(subcategoryFieldSchema.shape);
 export const educationUpdate = partial(educationSchema.shape);
 export const professionUpdate = partial(professionSchema.shape);
+export const schoolUpdate = partial(schoolSchema.shape);
+export const collegeUpdate = partial(collegeSchema.shape);
 export const hobbyUpdate = partial(hobbySchema.shape);
 export const profileTagUpdate = partial(profileTagSchema.shape);
 export const referralSourceUpdate = partial(referralSourceSchema.shape);

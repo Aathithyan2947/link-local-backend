@@ -53,6 +53,22 @@ export async function updateProfile(userId: number, data: z.infer<typeof updateP
   return updated;
 }
 
+/** Records how the member found us + who referred them (captured at address verification). */
+export async function setReferral(userId: number, input: { referralCode?: string; referralSourceId?: number }) {
+  const data: { referredBy?: number; referralSourceId?: number } = {};
+  const code = input.referralCode?.trim();
+  if (code) {
+    const referrer = await prisma.user.findUnique({ where: { referralCode: code } });
+    if (!referrer) throw ApiError.badRequest("That referral code isn't valid. Check the member ID and try again.");
+    if (referrer.id === userId) throw ApiError.badRequest("You can't use your own referral code.");
+    data.referredBy = referrer.id;
+  }
+  if (input.referralSourceId != null) data.referralSourceId = input.referralSourceId;
+  if (Object.keys(data).length === 0) return { updated: false };
+  await prisma.user.update({ where: { id: userId }, data });
+  return { updated: true };
+}
+
 export async function setPhoto(userId: number, photoUrl: string) {
   const profile = await requireProfile(userId);
   const updated = await prisma.profile.update({ where: { id: profile.id }, data: { photoUrl } });
@@ -60,40 +76,81 @@ export async function setPhoto(userId: number, photoUrl: string) {
   return updated;
 }
 
-// ── Education (self-adding master) ───────────────────────────
+// Degree, School and College are independent curated catalogs. Reuse a matching entry
+// (case-insensitive), else queue a brand-new "Other" suggestion as pending (isActive=false)
+// so it stays out of the app's pickers until an admin approves it.
+async function resolveCatalogId(
+  find: (value: string) => Promise<{ id: number } | null>,
+  create: (value: string) => Promise<{ id: number }>,
+  value?: string,
+): Promise<number | undefined> {
+  const v = value?.trim();
+  if (!v) return undefined;
+  const existing = await find(v);
+  return existing?.id ?? (await create(v)).id;
+}
+
+// ── Education (curated degree/school/college catalogs + self-suggested "Other") ──
 export async function addEducation(userId: number, input: z.infer<typeof educationSchema>) {
   const profile = await requireProfile(userId);
-  let educationMasterId = input.educationMasterId;
-  if (!educationMasterId) {
-    const master = await prisma.educationMaster.create({
-      data: {
-        degree: input.degree,
-        schoolName: input.schoolName,
-        schoolCity: input.schoolCity,
-        collegeName: input.collegeName,
-        collegeCity: input.collegeCity,
-        postGradCollege: input.postGradCollege,
-        postGradCity: input.postGradCity,
-      },
-    });
-    educationMasterId = master.id;
-  }
+
+  const degree = input.degree?.trim();
+  const educationMasterId =
+    input.educationMasterId ??
+    (await resolveCatalogId(
+      (v) => prisma.educationMaster.findFirst({ where: { degree: { equals: v, mode: 'insensitive' } } }),
+      (v) => prisma.educationMaster.create({ data: { degree: v, isActive: false } }),
+      degree,
+    ));
+
+  const schoolMasterId = await resolveCatalogId(
+    (v) => prisma.schoolMaster.findFirst({ where: { name: { equals: v, mode: 'insensitive' } } }),
+    (v) => prisma.schoolMaster.create({ data: { name: v, isActive: false } }),
+    input.schoolName,
+  );
+
+  const collegeMasterId = await resolveCatalogId(
+    (v) => prisma.collegeMaster.findFirst({ where: { name: { equals: v, mode: 'insensitive' } } }),
+    (v) => prisma.collegeMaster.create({ data: { name: v, isActive: false } }),
+    input.collegeName,
+  );
+
+  // The member's chosen names + cities are denormalized on their profile row for display.
   const row = await prisma.profileEducation.create({
-    data: { profileId: profile.id, educationMasterId },
+    data: {
+      profileId: profile.id,
+      educationMasterId,
+      schoolMasterId,
+      collegeMasterId,
+      degree,
+      schoolName: input.schoolName?.trim() || undefined,
+      schoolCity: input.schoolCity,
+      collegeName: input.collegeName?.trim() || undefined,
+      collegeCity: input.collegeCity,
+      university: input.university,
+      postGradCollege: input.postGradCollege,
+      postGradCity: input.postGradCity,
+    },
     include: { educationMaster: true },
   });
   await recomputeCompletion(profile.id);
   return row;
 }
 
-// ── Profession (self-adding category) ────────────────────────
+// ── Profession (curated category + self-suggested "Other") ──────
 export async function addProfession(userId: number, input: z.infer<typeof professionSchema>) {
   const profile = await requireProfile(userId);
   let professionMasterId = input.professionMasterId;
   if (!professionMasterId && input.category) {
-    const existing = await prisma.professionMaster.findFirst({ where: { category: input.category } });
+    const category = input.category.trim();
+    // Reuse an existing category (case-insensitive, any status) to avoid duplicate pendings;
+    // a brand-new "Other" category is queued as pending (isActive=false) for admin approval.
+    const existing = await prisma.professionMaster.findFirst({
+      where: { category: { equals: category, mode: 'insensitive' } },
+    });
     professionMasterId =
-      existing?.id ?? (await prisma.professionMaster.create({ data: { category: input.category } })).id;
+      existing?.id ??
+      (await prisma.professionMaster.create({ data: { category, isActive: false } })).id;
   }
   if (!professionMasterId) throw ApiError.badRequest('professionMasterId or category required');
   const row = await prisma.profileProfession.create({
@@ -230,6 +287,77 @@ export async function setServiceTypes(userId: number, input: z.infer<typeof serv
     where: { profileId: profile.id },
     include: { subcategory: { include: { category: true } } },
   });
+}
+
+// ── SP dynamic subcategory fields (menu/rate cards etc.) ─────
+/** The dynamic fields for the SP's selected subcategories, merged with their saved values. */
+export async function getMyCustomFields(userId: number) {
+  const profile = await prisma.profile.findUnique({
+    where: { userId },
+    include: { serviceTypes: { select: { subcategoryId: true } } },
+  });
+  if (!profile) throw ApiError.notFound('Profile not found');
+
+  const subcategoryIds = Array.from(new Set(profile.serviceTypes.map((s) => s.subcategoryId)));
+  if (subcategoryIds.length === 0) return [];
+
+  const fields = await prisma.serviceSubcategoryField.findMany({
+    where: { subcategoryId: { in: subcategoryIds }, isActive: true },
+    orderBy: [{ subcategoryId: 'asc' }, { sortOrder: 'asc' }],
+    include: { subcategory: { select: { name: true } } },
+  });
+  const values = await prisma.spProfileCustomField.findMany({
+    where: { profileId: profile.id, fieldId: { in: fields.map((f) => f.id) } },
+  });
+  const valueByField = new Map(values.map((v) => [v.fieldId, v.fieldValue]));
+
+  return fields.map((f) => ({
+    fieldId: f.id,
+    subcategoryId: f.subcategoryId,
+    subcategoryName: f.subcategory.name,
+    fieldName: f.fieldName,
+    fieldType: f.fieldType,
+    fieldOptions: f.fieldOptions,
+    isRequired: f.isRequired,
+    sortOrder: f.sortOrder,
+    value: valueByField.get(f.id) ?? '',
+  }));
+}
+
+/** Replaces the SP's answers for the fields of their selected subcategories. */
+export async function saveCustomFields(userId: number, values: { fieldId: number; value: string }[]) {
+  const profile = await requireProfile(userId);
+
+  const serviceTypes = await prisma.profileServiceType.findMany({
+    where: { profileId: profile.id },
+    select: { subcategoryId: true },
+  });
+  const subcategoryIds = Array.from(new Set(serviceTypes.map((s) => s.subcategoryId)));
+
+  // Only accept fields that actually belong to the SP's selected subcategories.
+  const validFields = await prisma.serviceSubcategoryField.findMany({
+    where: { id: { in: values.map((v) => v.fieldId) }, subcategoryId: { in: subcategoryIds }, isActive: true },
+    select: { id: true, isRequired: true, fieldName: true },
+  });
+  const validIds = new Set(validFields.map((f) => f.id));
+
+  for (const f of validFields) {
+    if (f.isRequired && !values.find((v) => v.fieldId === f.id)?.value?.trim()) {
+      throw ApiError.badRequest(`${f.fieldName} is required`);
+    }
+  }
+
+  const toSave = values.filter((v) => validIds.has(v.fieldId) && v.value.trim());
+  await prisma.$transaction([
+    prisma.spProfileCustomField.deleteMany({
+      where: { profileId: profile.id, fieldId: { in: Array.from(validIds) } },
+    }),
+    prisma.spProfileCustomField.createMany({
+      data: toSave.map((v) => ({ profileId: profile.id, fieldId: v.fieldId, fieldValue: v.value.trim() })),
+    }),
+  ]);
+  await recomputeCompletion(profile.id);
+  return getMyCustomFields(userId);
 }
 
 // ── SP products / delivery / payment ─────────────────────────

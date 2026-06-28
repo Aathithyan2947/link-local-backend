@@ -19,7 +19,7 @@ export const registerSchema = z
     email: emailField.optional(),
     mobile: z
       .string()
-      .regex(/^\+?[0-9]{7,15}$/, 'Invalid mobile number')
+      .regex(/^[0-9]{10}$/, 'Mobile number must be 10 digits')
       .optional(),
     password: passwordField,
     userType: z.enum(['resident', 'service_provider', 'business_listing']).default('resident'),
@@ -46,7 +46,7 @@ export const refreshSchema = z.object({
   refreshToken: z.string().min(1),
 });
 
-const mobileField = z.string().regex(/^\+?[0-9]{7,15}$/, 'Invalid mobile number');
+const mobileField = z.string().regex(/^[0-9]{10}$/, 'Mobile number must be 10 digits');
 
 export const otpRequestSchema = z
   .object({
@@ -67,6 +67,7 @@ export const otpVerifySchema = z
     name: z.string().min(1).max(100).optional(),
     userType: z.enum(['resident', 'service_provider', 'business_listing']).default('resident'),
     referralCode: z.string().optional(),
+    referralSourceId: z.coerce.number().int().optional(),
   })
   .refine((d) => d.mobile || d.email, { message: 'mobile or email required', path: ['mobile'] });
 

@@ -42,6 +42,12 @@ adminRouter.get(
   }),
 );
 
+adminRouter.get(
+  '/members/:id',
+  admin,
+  asyncHandler(async (req, res) => ok(res, await service.getMemberDetail(Number(req.params.id)))),
+);
+
 adminRouter.patch(
   '/members/:id/status',
   authenticate('admin'),

@@ -60,10 +60,13 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
     create: { userId, cityId: input.cityId, isPrimary: true },
   });
 
-  // Feed the locality (no building/flat) into the Address Master — reuse an approved
-  // match or queue a new pending one. Never blocks the user.
+  // Feed the locality (building/complex name + lane/area, never the flat) into the Address
+  // Master — reuse an approved match or queue a new pending one. Never blocks the user.
+  // The complex name is included so a brand-new "Other" building the user types is captured
+  // and surfaces in the admin for verification/approval (instead of silently dropped).
   await upsertMasterFromSubmission({
     cityId: input.cityId,
+    complex: input.apartment,
     lane1: input.lane1,
     lane2: input.lane2,
     area: input.areaName,
@@ -94,6 +97,7 @@ export async function addVerificationDoc(params: {
   userId: number;
   docType: string;
   docUrl: string;
+  description?: string;
 }) {
   const address = await getMyAddress(params.userId);
   if (!address) throw ApiError.badRequest('Add an address before uploading proof');
@@ -103,10 +107,57 @@ export async function addVerificationDoc(params: {
       addressId: address.id,
       cityId: address.area.cityId,
       docType: params.docType,
+      description: params.description,
       docUrl: params.docUrl,
       status: 'pending',
     },
   });
+}
+
+/**
+ * Guarantees the "Other" document type is enabled for a city (idempotent). "Other" is always
+ * available to members in every city, and any "Other" proof always goes through admin
+ * verification (uploaded as pending). Existing rows are left as-is so an admin can still
+ * deactivate it deliberately.
+ */
+export async function ensureCityOtherDocType(cityId: number) {
+  await prisma.cityAllowedDocType.upsert({
+    where: { cityId_docType: { cityId, docType: 'other' } },
+    update: {},
+    create: { cityId, docType: 'other', isActive: true },
+  });
+}
+
+/**
+ * Deletes a city safely. Admin-only config rows (allowed doc types, address-form fields) are
+ * removed first so an otherwise-empty city can be deleted; if the city still has real data
+ * (areas, members, addresses, master localities), the FK blocks it and we surface a clear
+ * message asking the admin to deactivate it instead of a 500 / broken page.
+ */
+export async function deleteCity(cityId: number) {
+  const city = await prisma.city.findUnique({ where: { id: cityId } });
+  if (!city) throw ApiError.notFound('City not found');
+
+  try {
+    // Atomic: if the city can't be deleted (real data still references it), the config
+    // deletions roll back too — so a blocked delete never wipes the city's doc types / form.
+    await prisma.$transaction(async (tx) => {
+      await tx.cityAllowedDocType.deleteMany({ where: { cityId } });
+      await tx.cityAddressField.deleteMany({ where: { cityId } });
+      await tx.city.delete({ where: { id: cityId } });
+    });
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    const msg = String((e as { message?: string }).message ?? '');
+    const isFk = code === 'P2003' || code === 'P2014' || /foreign key|constraint|violates|2350[0-9]|23001/i.test(msg);
+    if (isFk) {
+      throw ApiError.conflict(
+        "This city has members, areas or addresses linked to it, so it can't be deleted. Deactivate it instead.",
+      );
+    }
+    throw e;
+  }
+  return { id: cityId, deleted: true };
 }
 
 /**
@@ -240,6 +291,7 @@ export async function findNearbyMaster(
 
 interface MasterSubmission {
   cityId: number;
+  complex?: string;
   lane1?: string;
   lane2?: string;
   area?: string;
@@ -264,6 +316,7 @@ interface MasterSubmission {
  */
 export async function upsertMasterFromSubmission(input: MasterSubmission) {
   const norm = (s?: string) => s?.trim() || undefined;
+  const complex = norm(input.complex);
   const lane1 = norm(input.lane1);
   const lane2 = norm(input.lane2);
   const area = norm(input.area);
@@ -271,7 +324,7 @@ export async function upsertMasterFromSubmission(input: MasterSubmission) {
   const pincode = norm(input.pincode);
 
   // Nothing meaningful to record as a locality.
-  if (!lane1 && !lane2 && !area && !suburb) return null;
+  if (!complex && !lane1 && !lane2 && !area && !suburb) return null;
 
   // (a) Geographic match: an approved locality within ~0.3 km is the same place.
   if (input.latitude != null && input.longitude != null) {
@@ -286,6 +339,7 @@ export async function upsertMasterFromSubmission(input: MasterSubmission) {
   const existing = await prisma.addressMaster.findFirst({
     where: {
       cityId: input.cityId,
+      complex: eq(complex),
       lane1: eq(lane1),
       lane2: eq(lane2),
       area: eq(area),
@@ -299,6 +353,7 @@ export async function upsertMasterFromSubmission(input: MasterSubmission) {
   return prisma.addressMaster.create({
     data: {
       cityId: input.cityId,
+      complex,
       lane1,
       lane2,
       area,
@@ -339,6 +394,7 @@ export async function listAddressDocs(params: { page: number; pageSize: number; 
   const items = rows.map((d) => ({
     id: d.id,
     docType: d.docType,
+    description: d.description,
     docUrl: d.docUrl,
     status: d.status ?? 'pending',
     createdAt: d.createdAt,
@@ -356,6 +412,21 @@ export async function reviewAddressDoc(docId: number, status: 'approved' | 'reje
     data: { status, reviewedBy: adminId, reviewedAt: new Date() },
     include: { address: { include: { profiles: true } } },
   });
+
+  // Keep the member's verification status in sync with their address proofs: a member is
+  // verified only while at least one APPROVED proof exists. So approving verifies them, and
+  // rejecting un-verifies them (unless another approved proof remains). Re-uploading a fresh
+  // proof after a rejection creates a new pending doc that can be approved to re-verify.
+  const approvedCount = await prisma.addressVerificationDoc.count({
+    where: { addressId: doc.addressId, status: 'approved' },
+  });
+  const userIds = doc.address.profiles.map((p) => p.userId);
+  if (userIds.length) {
+    await prisma.user.updateMany({
+      where: { id: { in: userIds } },
+      data: { isVerified: approvedCount > 0 },
+    });
+  }
   return doc;
 }
 
@@ -589,6 +660,7 @@ export async function importAddresses(
         const existing = await prisma.city.findFirst({ where: { name: cityName } });
         cityId = existing?.id ?? (await prisma.city.create({ data: { name: cityName } })).id;
         cityCache.set(cityName.toLowerCase(), cityId);
+        await ensureCityOtherDocType(cityId);
       }
 
       const dedupeKey = `${cityId}|${complex.toLowerCase()}|${lane1.toLowerCase()}|${lane2.toLowerCase()}`;

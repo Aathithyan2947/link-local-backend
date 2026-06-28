@@ -33,29 +33,35 @@ export const reviewMasterSchema = z.object({
   status: z.enum(['approved', 'rejected']),
 });
 
-const masterFields = {
-  cityId: z.number().int(),
-  complex: z.string().optional(),
-  lane1: z.string().optional(),
-  lane2: z.string().optional(),
-  area: z.string().optional(),
-  suburb: z.string().optional(),
-  pincode: z.string().optional(),
-  latitude: z.number().optional(),
-  longitude: z.number().optional(),
+// Latitude / Longitude are mandatory for a master locality — they power the app's 2 km
+// nearby-autofill, so a locality without coordinates is unusable.
+const latitude = z.number().min(-90).max(90);
+const longitude = z.number().min(-180).max(180);
+
+// Every locality field is mandatory in the admin "Add locality" form — a curated master
+// entry must be complete. (The per-city Form Format only governs the app's address form.)
+const requiredText = (label: string) => z.string().trim().min(1, `${label} is required`);
+
+const masterTextFields = {
+  complex: requiredText('Complex / Building name'),
+  lane1: requiredText('Lane 1'),
+  lane2: requiredText('Lane 2'),
+  area: requiredText('Area'),
+  suburb: requiredText('Suburb'),
+  pincode: requiredText('Pincode'),
 };
 
-export const createMasterSchema = z.object(masterFields);
+export const createMasterSchema = z.object({
+  cityId: z.number().int(),
+  ...masterTextFields,
+  latitude,
+  longitude,
+});
 export const updateMasterSchema = z.object({
   cityId: z.number().int().optional(),
-  complex: z.string().optional(),
-  lane1: z.string().optional(),
-  lane2: z.string().optional(),
-  area: z.string().optional(),
-  suburb: z.string().optional(),
-  pincode: z.string().optional(),
-  latitude: z.number().optional(),
-  longitude: z.number().optional(),
+  ...masterTextFields,
+  latitude,
+  longitude,
 });
 
 // Address-proof review queue — status is the document's verification state.
