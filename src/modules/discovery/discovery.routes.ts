@@ -9,6 +9,10 @@ import * as service from './discovery.service.js';
 
 const listQuery = paginationSchema.extend({ q: z.string().optional() });
 const spListQuery = listQuery.extend({ subcategoryId: z.coerce.number().int().optional() });
+const ratingSchema = z.object({
+  rating: z.coerce.number().int().min(1).max(5),
+  review: z.string().max(1000).optional(),
+});
 
 // ── Events ───────────────────────────────────────────────────
 export const eventsRouter = Router();
@@ -63,5 +67,13 @@ serviceProvidersRouter.get(
   authenticate('user'),
   asyncHandler(async (req, res) =>
     ok(res, await service.getServiceProvider(Number(req.params.id))),
+  ),
+);
+serviceProvidersRouter.post(
+  '/:id/ratings',
+  authenticate('user'),
+  validate({ body: ratingSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.rateServiceProvider(Number(req.params.id), req.auth!.sub, req.body), 201),
   ),
 );
