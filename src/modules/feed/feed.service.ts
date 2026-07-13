@@ -2,17 +2,30 @@ import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
 import { resolveUserCityId } from '../home/home.service.js';
+import { bumpUserStats } from '../../lib/stats.js';
+import { emitNotification } from '../../lib/notify.js';
+
+const authorSelect = {
+  user: { select: { id: true, profile: { select: { id: true, name: true, photoUrl: true } } } },
+};
 
 const postInclude = {
-  user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+  ...authorSelect,
   media: { orderBy: { sortOrder: 'asc' as const } },
   _count: { select: { likes: true, comments: true, shares: true } },
 };
 
-export async function listPosts(
-  userId: number,
-  params: PaginationParams & { postType?: string },
-) {
+/** Marks which of `postIds` the viewer has liked. */
+async function likedSet(userId: number, postIds: number[]): Promise<Set<number>> {
+  if (postIds.length === 0) return new Set();
+  const rows = await prisma.postLike.findMany({
+    where: { userId, postId: { in: postIds } },
+    select: { postId: true },
+  });
+  return new Set(rows.map((r) => r.postId));
+}
+
+export async function listPosts(userId: number, params: PaginationParams & { postType?: string }) {
   const cityId = await resolveUserCityId(userId);
   const where: Record<string, unknown> = { isActive: true };
   if (params.postType) where.postType = params.postType;
@@ -27,10 +40,12 @@ export async function listPosts(
     }),
     prisma.post.count({ where }),
   ]);
-  return { items, meta: buildMeta(params.page, params.pageSize, total) };
+  const liked = await likedSet(userId, items.map((p) => p.id));
+  const enriched = items.map((p) => ({ ...p, viewerLiked: liked.has(p.id) }));
+  return { items: enriched, meta: buildMeta(params.page, params.pageSize, total) };
 }
 
-export async function getPost(id: number) {
+export async function getPost(id: number, userId: number) {
   const post = await prisma.post.findUnique({
     where: { id },
     include: {
@@ -39,21 +54,22 @@ export async function getPost(id: number) {
         where: { parentCommentId: null },
         orderBy: { createdAt: 'desc' },
         include: {
-          user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
-          replies: true,
+          ...authorSelect,
+          replies: { orderBy: { createdAt: 'asc' }, include: authorSelect },
         },
       },
     },
   });
   if (!post) throw ApiError.notFound('Post not found');
-  return post;
+  const liked = await prisma.postLike.findFirst({ where: { postId: id, userId } });
+  return { ...post, viewerLiked: !!liked };
 }
 
 export async function createPost(
   userId: number,
   data: { postType: string; textContent?: string; media?: { mediaType: string; url: string }[] },
 ) {
-  return prisma.post.create({
+  const post = await prisma.post.create({
     data: {
       userId,
       postType: data.postType,
@@ -64,6 +80,8 @@ export async function createPost(
     },
     include: postInclude,
   });
+  await bumpUserStats(userId, { postsMade: 1 });
+  return { ...post, viewerLiked: false };
 }
 
 export async function toggleLike(userId: number, postId: number) {
@@ -76,9 +94,41 @@ export async function toggleLike(userId: number, postId: number) {
   return { liked: true };
 }
 
-export async function addComment(userId: number, postId: number, comment: string, parentCommentId?: number) {
-  return prisma.postComment.create({
+export async function addComment(
+  userId: number,
+  postId: number,
+  comment: string,
+  parentCommentId?: number,
+) {
+  const post = await prisma.post.findUnique({ where: { id: postId }, select: { userId: true } });
+  if (!post) throw ApiError.notFound('Post not found');
+
+  const created = await prisma.postComment.create({
     data: { userId, postId, comment, parentCommentId },
-    include: { user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } } },
+    include: authorSelect,
   });
+  if (post.userId !== userId) {
+    await emitNotification({
+      userId: post.userId,
+      title: 'New comment',
+      body: comment.slice(0, 80),
+      type: 'message',
+      entityType: 'post',
+      entityId: postId,
+    });
+  }
+  return created;
+}
+
+/** Records a post share (both the post-specific and unified entity_shares logs). */
+export async function sharePost(userId: number, postId: number, channel?: string) {
+  const post = await prisma.post.findUnique({ where: { id: postId }, select: { id: true } });
+  if (!post) throw ApiError.notFound('Post not found');
+  await prisma.$transaction([
+    prisma.postShare.create({ data: { postId, userId } }),
+    prisma.entityShare.create({
+      data: { userId, entityType: 'post', entityId: postId, sharingChannel: channel ?? 'in_app' },
+    }),
+  ]);
+  return { shared: true };
 }

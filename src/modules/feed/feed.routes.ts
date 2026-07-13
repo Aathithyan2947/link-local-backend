@@ -40,7 +40,7 @@ feedRouter.get(
 feedRouter.get(
   '/:id',
   authenticate('user'),
-  asyncHandler(async (req, res) => ok(res, await service.getPost(Number(req.params.id)))),
+  asyncHandler(async (req, res) => ok(res, await service.getPost(Number(req.params.id), req.auth!.sub))),
 );
 
 feedRouter.post(
@@ -55,6 +55,14 @@ feedRouter.post(
   authenticate('user'),
   asyncHandler(async (req, res) =>
     ok(res, await service.toggleLike(req.auth!.sub, Number(req.params.id))),
+  ),
+);
+
+feedRouter.post(
+  '/:id/share',
+  authenticate('user'),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.sharePost(req.auth!.sub, Number(req.params.id), req.body?.channel), 201),
   ),
 );
 

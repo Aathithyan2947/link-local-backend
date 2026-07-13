@@ -46,6 +46,57 @@ export async function getMyProfile(userId: number) {
   return profile;
 }
 
+/** Public profile view (the "User" frame) — any member viewing another member. */
+export async function getPublicProfile(profileId: number) {
+  const profile = await prisma.profile.findUnique({
+    where: { id: profileId },
+    include: {
+      user: { select: { id: true, userType: true, mobile: true } },
+      address: { include: { area: { include: { city: true } } } },
+      educations: { include: { educationMaster: true } },
+      professions: { include: { professionMaster: true } },
+    },
+  });
+  if (!profile) throw ApiError.notFound('Profile not found');
+  const userId = profile.userId;
+
+  const eventInclude = {
+    creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+    _count: { select: { attendees: true } },
+  };
+
+  const [hosted, attending, posts, adminGroups, memberGroups, servicesContacted] = await Promise.all([
+    prisma.event.findMany({ where: { creatorId: userId, isActive: true }, orderBy: { date: 'desc' }, take: 10, include: eventInclude }),
+    prisma.event.findMany({ where: { isActive: true, attendees: { some: { userId, status: 'joined' } } }, orderBy: { date: 'desc' }, take: 10, include: eventInclude }),
+    prisma.post.findMany({
+      where: { userId, isActive: true },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      include: {
+        user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+        media: { take: 1, orderBy: { sortOrder: 'asc' } },
+        _count: { select: { likes: true, comments: true } },
+      },
+    }),
+    prisma.interestGroupAdmin.findMany({ where: { userId }, include: { group: { include: { _count: { select: { members: true } } } } } }),
+    prisma.interestGroupMember.findMany({ where: { userId, status: 'joined' }, include: { group: { include: { _count: { select: { members: true } } } } } }),
+    prisma.serviceProviderRating.count({ where: { ratedBy: userId } }),
+  ]);
+
+  const hostedIds = new Set(hosted.map((e) => e.id));
+  const events = [
+    ...hosted.map((e) => ({ ...e, relation: 'hosting' as const })),
+    ...attending.filter((e) => !hostedIds.has(e.id)).map((e) => ({ ...e, relation: 'attending' as const })),
+  ];
+  const adminGroupIds = new Set(adminGroups.map((a) => a.groupId));
+  const groups = [
+    ...adminGroups.map((a) => ({ ...a.group, role: 'admin' as const })),
+    ...memberGroups.filter((m) => !adminGroupIds.has(m.groupId)).map((m) => ({ ...m.group, role: 'member' as const })),
+  ];
+
+  return { ...profile, events, posts, groups, servicesContacted };
+}
+
 export async function updateProfile(userId: number, data: z.infer<typeof updateProfileSchema>) {
   const profile = await requireProfile(userId);
   const updated = await prisma.profile.update({ where: { id: profile.id }, data });
@@ -366,6 +417,22 @@ export async function addProduct(userId: number, input: z.infer<typeof productSc
   const row = await prisma.spProduct.create({ data: { profileId: profile.id, ...input } });
   await recomputeCompletion(profile.id);
   return row;
+}
+
+export async function listMyProducts(userId: number) {
+  const profile = await requireProfile(userId);
+  return prisma.spProduct.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: 'asc' } });
+}
+
+export async function updateProduct(
+  userId: number,
+  id: number,
+  input: Partial<z.infer<typeof productSchema>>,
+) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.spProduct.findUnique({ where: { id } });
+  if (!row || row.profileId !== profile.id) throw ApiError.notFound('Product not found');
+  return prisma.spProduct.update({ where: { id }, data: input });
 }
 
 export async function setDelivery(userId: number, input: z.infer<typeof deliverySchema>) {

@@ -2,6 +2,45 @@ import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
 import { resolveUserCityId } from '../home/home.service.js';
+import { bumpUserStats } from '../../lib/stats.js';
+import { emitNotification } from '../../lib/notify.js';
+import { mockCharge } from '../../lib/payments.js';
+import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
+
+/** Parses an ISO date/time string into a Date, or null. Used for @db.Time/@db.Date. */
+function parseDate(v: string | undefined | null): Date | null {
+  if (!v) return null;
+  // Accept "HH:mm" for time-only fields as well as full ISO strings.
+  const iso = /^\d{2}:\d{2}(:\d{2})?$/.test(v) ? `1970-01-01T${v.length === 5 ? v + ':00' : v}.000Z` : v;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+const eventCardInclude = {
+  creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+  _count: { select: { attendees: true } },
+};
+
+export interface CreateEventInput {
+  title: string;
+  description?: string;
+  photoUrl?: string;
+  date: string;
+  startTime?: string;
+  durationMinutes?: number;
+  mode: 'online' | 'offline';
+  location?: string;
+  onlineLink?: string;
+  isPrivate?: boolean;
+  isPaid?: boolean;
+  price?: number;
+  maxAttendees?: number;
+  eligibilityMinAge?: number;
+  eligibilityGender?: 'all' | 'male' | 'female';
+  allowCloning?: boolean;
+  adminApprovalNeeded?: boolean;
+  rawMaterials?: string[];
+}
 
 const byCreatorCity = (cityId: number | null) =>
   cityId ? { creator: { profile: { address: { area: { cityId } } } } } : {};
@@ -61,17 +100,241 @@ export async function listEvents(userId: number, params: PaginationParams & { q?
   return { items: enriched, meta: buildMeta(params.page, params.pageSize, total) };
 }
 
-export async function getEvent(id: number) {
+export async function getEvent(id: number, viewerId?: number) {
   const event = await prisma.event.findUnique({
     where: { id },
     include: {
-      creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+      creator: {
+        select: {
+          id: true,
+          profile: {
+            select: {
+              id: true,
+              name: true,
+              photoUrl: true,
+              aboutMe: true,
+              serviceTypes: { include: { subcategory: true }, take: 1 },
+              address: { include: { area: { include: { city: true } } } },
+            },
+          },
+        },
+      },
       rawMaterials: true,
-      _count: { select: { attendees: true } },
+      ratings: {
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        include: {
+          user: { select: { id: true, userType: true, profile: { select: { name: true } } } },
+        },
+      },
+      _count: { select: { attendees: { where: { status: 'joined' } } } },
     },
   });
   if (!event) throw ApiError.notFound('Event not found');
+
+  const agg = await prisma.eventRating.aggregate({
+    where: { eventId: id, rating: { not: null } },
+    _avg: { rating: true },
+    _count: { rating: true },
+  });
+
+  let myAttendance: { status: string; paymentStatus: string | null } | null = null;
+  if (viewerId) {
+    const a = await prisma.eventAttendee.findFirst({ where: { eventId: id, userId: viewerId } });
+    if (a) myAttendance = { status: a.status, paymentStatus: a.paymentStatus };
+  }
+
+  return {
+    ...event,
+    ratingAvg: agg._avg.rating != null ? Math.round(agg._avg.rating * 10) / 10 : null,
+    ratingCount: agg._count.rating,
+    myAttendance,
+  };
+}
+
+// ── Events lifecycle (create / join / withdraw / pay / rate) ──
+
+export async function createEvent(userId: number, data: CreateEventInput) {
+  const event = await prisma.event.create({
+    data: {
+      creatorId: userId,
+      title: data.title,
+      description: data.description,
+      photoUrl: data.photoUrl,
+      date: parseDate(data.date) ?? new Date(),
+      startTime: parseDate(data.startTime),
+      durationMinutes: data.durationMinutes,
+      mode: data.mode,
+      location: data.location,
+      onlineLink: data.onlineLink,
+      isPrivate: data.isPrivate ?? false,
+      isPaid: data.isPaid ?? false,
+      price: data.price,
+      maxAttendees: data.maxAttendees,
+      eligibilityMinAge: data.eligibilityMinAge,
+      eligibilityGender: data.eligibilityGender,
+      allowCloning: data.allowCloning ?? false,
+      adminApprovalNeeded: data.adminApprovalNeeded ?? false,
+      rawMaterials: data.rawMaterials?.length
+        ? { create: data.rawMaterials.map((material) => ({ material })) }
+        : undefined,
+    },
+    include: eventCardInclude,
+  });
+  await bumpUserStats(userId, { eventsHosted: 1 });
   return event;
+}
+
+export async function updateEvent(eventId: number, userId: number, data: Partial<CreateEventInput>) {
+  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { creatorId: true } });
+  if (!event) throw ApiError.notFound('Event not found');
+  if (event.creatorId !== userId) throw ApiError.forbidden('Only the host can edit this event');
+
+  return prisma.event.update({
+    where: { id: eventId },
+    data: {
+      title: data.title,
+      description: data.description,
+      photoUrl: data.photoUrl,
+      date: data.date ? parseDate(data.date) ?? undefined : undefined,
+      startTime: data.startTime !== undefined ? parseDate(data.startTime) : undefined,
+      durationMinutes: data.durationMinutes,
+      mode: data.mode,
+      location: data.location,
+      onlineLink: data.onlineLink,
+      isPrivate: data.isPrivate,
+      isPaid: data.isPaid,
+      price: data.price,
+      maxAttendees: data.maxAttendees,
+      eligibilityGender: data.eligibilityGender,
+      eligibilityMinAge: data.eligibilityMinAge,
+    },
+    include: eventCardInclude,
+  });
+}
+
+export async function joinEvent(eventId: number, userId: number) {
+  const event = await prisma.event.findUnique({
+    where: { id: eventId },
+    include: { _count: { select: { attendees: { where: { status: 'joined' } } } } },
+  });
+  if (!event) throw ApiError.notFound('Event not found');
+  if (event.creatorId === userId) throw ApiError.badRequest('You are hosting this event');
+
+  const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
+  if (existing?.status === 'joined') return existing;
+
+  if (event.maxAttendees && event._count.attendees >= event.maxAttendees) {
+    throw ApiError.badRequest('This event is full');
+  }
+
+  const status = event.adminApprovalNeeded ? 'pending_approval' : 'joined';
+  const paymentStatus = event.isPaid ? 'unpaid' : null;
+
+  const attendee = existing
+    ? await prisma.eventAttendee.update({ where: { id: existing.id }, data: { status, paymentStatus } })
+    : await prisma.eventAttendee.create({ data: { eventId, userId, status, paymentStatus } });
+
+  await emitNotification({
+    userId: event.creatorId,
+    title: 'New attendee',
+    body: `Someone joined "${event.title}"`,
+    type: 'event_invite',
+    entityType: 'event',
+    entityId: eventId,
+  });
+  return attendee;
+}
+
+export async function withdrawEvent(eventId: number, userId: number) {
+  const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
+  if (!existing) throw ApiError.badRequest('You have not joined this event');
+  return prisma.eventAttendee.update({ where: { id: existing.id }, data: { status: 'withdrawn' } });
+}
+
+export async function payForEvent(eventId: number, userId: number, couponCode?: string) {
+  const event = await prisma.event.findUnique({ where: { id: eventId } });
+  if (!event) throw ApiError.notFound('Event not found');
+  if (!event.isPaid) throw ApiError.badRequest('This event is free');
+
+  const base = Number(event.price ?? 0);
+  const coupon = await resolveCoupon(couponCode, base);
+  const discount = coupon?.discount ?? 0;
+  const amount = Math.max(base - discount, 0);
+
+  const charge = mockCharge(amount); // MOCK gateway
+  const payment = await prisma.eventPayment.create({
+    data: {
+      eventId,
+      userId,
+      amount,
+      couponId: coupon?.couponId,
+      discountApplied: discount,
+      paymentStatus: 'paid',
+      transactionRef: charge.transactionRef,
+      paidAt: charge.paidAt,
+    },
+  });
+  if (coupon) await redeemCoupon(coupon.couponId, userId, 'event', payment.id);
+
+  // ensure the attendee row is joined + paid
+  const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
+  if (existing) {
+    await prisma.eventAttendee.update({
+      where: { id: existing.id },
+      data: { status: 'joined', paymentStatus: 'paid' },
+    });
+  } else {
+    await prisma.eventAttendee.create({
+      data: { eventId, userId, status: 'joined', paymentStatus: 'paid' },
+    });
+  }
+  return payment;
+}
+
+export async function rateEvent(
+  eventId: number,
+  userId: number,
+  data: { rating: number; review?: string },
+) {
+  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { id: true } });
+  if (!event) throw ApiError.notFound('Event not found');
+
+  const existing = await prisma.eventRating.findFirst({ where: { eventId, userId } });
+  if (existing) {
+    return prisma.eventRating.update({
+      where: { id: existing.id },
+      data: { rating: data.rating, review: data.review ?? null },
+    });
+  }
+  return prisma.eventRating.create({
+    data: { eventId, userId, rating: data.rating, review: data.review ?? null },
+  });
+}
+
+export async function requestEventDeletion(eventId: number, userId: number, reason?: string) {
+  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { creatorId: true } });
+  if (!event) throw ApiError.notFound('Event not found');
+  if (event.creatorId !== userId) throw ApiError.forbidden('Only the host can request deletion');
+  return prisma.eventDeletionRequest.create({
+    data: { eventId, requestedBy: userId, reason, status: 'pending' },
+  });
+}
+
+export async function myEvents(userId: number) {
+  const [hosted, attending] = await Promise.all([
+    prisma.event.findMany({
+      where: { creatorId: userId, isActive: true },
+      orderBy: { date: 'desc' },
+      include: eventCardInclude,
+    }),
+    prisma.event.findMany({
+      where: { isActive: true, attendees: { some: { userId, status: 'joined' } } },
+      orderBy: { date: 'desc' },
+      include: eventCardInclude,
+    }),
+  ]);
+  return { hosted, attending };
 }
 
 // ── Interest Groups ──────────────────────────────────────────
@@ -95,16 +358,258 @@ export async function listGroups(userId: number, params: PaginationParams & { q?
   return { items, meta: buildMeta(params.page, params.pageSize, total) };
 }
 
-export async function getGroup(id: number) {
+const groupCardInclude = {
+  creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+  _count: { select: { members: true } },
+};
+
+export interface CreateGroupInput {
+  title: string;
+  description?: string;
+  photoUrl?: string;
+  durationDays?: number;
+  isPrivate?: boolean;
+  isPaid?: boolean;
+  price?: number;
+  maxMembers?: number;
+  eligibilityMinAge?: number;
+  eligibilityGender?: 'all' | 'male' | 'female';
+  adminApprovalNeeded?: boolean;
+  multipleAdminsAllowed?: boolean;
+}
+
+export async function getGroup(id: number, viewerId?: number) {
   const group = await prisma.interestGroup.findUnique({
     where: { id },
     include: {
       creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
-      _count: { select: { members: true } },
+      posts: {
+        orderBy: { id: 'desc' },
+        take: 10,
+        include: {
+          post: {
+            include: {
+              user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+              media: { take: 1, orderBy: { sortOrder: 'asc' } },
+              _count: { select: { likes: true, comments: true } },
+            },
+          },
+        },
+      },
+      _count: { select: { members: { where: { status: 'joined' } } } },
     },
   });
   if (!group) throw ApiError.notFound('Group not found');
+
+  const agg = await prisma.interestGroupRating.aggregate({
+    where: { groupId: id },
+    _avg: { rating: true },
+    _count: { rating: true },
+  });
+
+  let myMembership: { status: string; paymentStatus: string | null } | null = null;
+  let isCreator = false;
+  if (viewerId) {
+    isCreator = group.creatorId === viewerId;
+    const m = await prisma.interestGroupMember.findFirst({ where: { groupId: id, userId: viewerId } });
+    if (m) myMembership = { status: m.status, paymentStatus: m.paymentStatus };
+  }
+
+  const { posts, ...rest } = group;
+  return {
+    ...rest,
+    discussions: posts.map((gp) => gp.post),
+    ratingAvg: agg._avg.rating != null ? Math.round(agg._avg.rating * 10) / 10 : null,
+    ratingCount: agg._count.rating,
+    myMembership,
+    isCreator,
+  };
+}
+
+// ── Groups lifecycle (create / join / leave / pay / rate / post) ──
+
+export async function createGroup(userId: number, data: CreateGroupInput) {
+  const group = await prisma.interestGroup.create({
+    data: {
+      creatorId: userId,
+      title: data.title,
+      description: data.description,
+      photoUrl: data.photoUrl,
+      durationDays: data.durationDays,
+      isPrivate: data.isPrivate ?? false,
+      isPaid: data.isPaid ?? false,
+      price: data.price,
+      maxMembers: data.maxMembers,
+      eligibilityMinAge: data.eligibilityMinAge,
+      eligibilityGender: data.eligibilityGender,
+      adminApprovalNeeded: data.adminApprovalNeeded ?? false,
+      multipleAdminsAllowed: data.multipleAdminsAllowed ?? false,
+      admins: { create: { userId, isCreator: true } },
+      members: { create: { userId, status: 'joined' } },
+    },
+    include: groupCardInclude,
+  });
+  await bumpUserStats(userId, { groupsPartOf: 1 });
   return group;
+}
+
+export async function updateGroup(groupId: number, userId: number, data: Partial<CreateGroupInput>) {
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true } });
+  if (!group) throw ApiError.notFound('Group not found');
+  if (group.creatorId !== userId) throw ApiError.forbidden('Only the creator can edit this group');
+  return prisma.interestGroup.update({
+    where: { id: groupId },
+    data: {
+      title: data.title,
+      description: data.description,
+      photoUrl: data.photoUrl,
+      durationDays: data.durationDays,
+      isPrivate: data.isPrivate,
+      isPaid: data.isPaid,
+      price: data.price,
+      maxMembers: data.maxMembers,
+      eligibilityGender: data.eligibilityGender,
+      eligibilityMinAge: data.eligibilityMinAge,
+    },
+    include: groupCardInclude,
+  });
+}
+
+export async function joinGroup(groupId: number, userId: number) {
+  const group = await prisma.interestGroup.findUnique({
+    where: { id: groupId },
+    include: { _count: { select: { members: { where: { status: 'joined' } } } } },
+  });
+  if (!group) throw ApiError.notFound('Group not found');
+  if (group.creatorId === userId) throw ApiError.badRequest('You created this group');
+
+  const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
+  if (existing?.status === 'joined') return existing;
+  if (group.maxMembers && group._count.members >= group.maxMembers) {
+    throw ApiError.badRequest('This group is full');
+  }
+
+  const status = group.adminApprovalNeeded ? 'pending_approval' : 'joined';
+  const paymentStatus = group.isPaid ? 'unpaid' : null;
+  const member = existing
+    ? await prisma.interestGroupMember.update({ where: { id: existing.id }, data: { status, paymentStatus } })
+    : await prisma.interestGroupMember.create({ data: { groupId, userId, status, paymentStatus } });
+
+  if (status === 'joined') await bumpUserStats(userId, { groupsPartOf: 1 });
+  await emitNotification({
+    userId: group.creatorId,
+    title: 'New member',
+    body: `Someone joined "${group.title}"`,
+    type: 'group_invite',
+    entityType: 'group',
+    entityId: groupId,
+  });
+  return member;
+}
+
+export async function leaveGroup(groupId: number, userId: number) {
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true } });
+  if (!group) throw ApiError.notFound('Group not found');
+  if (group.creatorId === userId) throw ApiError.badRequest('The creator cannot exit the group');
+  const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
+  if (!existing) throw ApiError.badRequest('You are not a member');
+  return prisma.interestGroupMember.update({ where: { id: existing.id }, data: { status: 'exited' } });
+}
+
+export async function payForGroup(groupId: number, userId: number, couponCode?: string) {
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId } });
+  if (!group) throw ApiError.notFound('Group not found');
+  if (!group.isPaid) throw ApiError.badRequest('This group is free');
+
+  const base = Number(group.price ?? 0);
+  const coupon = await resolveCoupon(couponCode, base);
+  const discount = coupon?.discount ?? 0;
+  const amount = Math.max(base - discount, 0);
+
+  const charge = mockCharge(amount); // MOCK gateway
+  const payment = await prisma.interestGroupPayment.create({
+    data: {
+      groupId,
+      userId,
+      amount,
+      couponId: coupon?.couponId,
+      discountApplied: discount,
+      paymentStatus: 'paid',
+      transactionRef: charge.transactionRef,
+      paidAt: charge.paidAt,
+    },
+  });
+  if (coupon) await redeemCoupon(coupon.couponId, userId, 'group', payment.id);
+
+  const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
+  if (existing) {
+    await prisma.interestGroupMember.update({
+      where: { id: existing.id },
+      data: { status: 'joined', paymentStatus: 'paid' },
+    });
+  } else {
+    await prisma.interestGroupMember.create({
+      data: { groupId, userId, status: 'joined', paymentStatus: 'paid' },
+    });
+  }
+  return payment;
+}
+
+export async function rateGroup(
+  groupId: number,
+  userId: number,
+  data: { rating: number; review?: string },
+) {
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { id: true } });
+  if (!group) throw ApiError.notFound('Group not found');
+  const existing = await prisma.interestGroupRating.findFirst({ where: { groupId, userId } });
+  if (existing) {
+    return prisma.interestGroupRating.update({
+      where: { id: existing.id },
+      data: { rating: data.rating, review: data.review ?? null },
+    });
+  }
+  return prisma.interestGroupRating.create({
+    data: { groupId, userId, rating: data.rating, review: data.review ?? null },
+  });
+}
+
+export async function createGroupPost(
+  groupId: number,
+  userId: number,
+  data: { textContent?: string; media?: { mediaType: string; url: string }[] },
+) {
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true } });
+  if (!group) throw ApiError.notFound('Group not found');
+  const member = await prisma.interestGroupMember.findFirst({
+    where: { groupId, userId, status: 'joined' },
+  });
+  if (!member && group.creatorId !== userId) throw ApiError.forbidden('Only members can post');
+
+  const post = await prisma.post.create({
+    data: {
+      userId,
+      postType: 'share_update',
+      textContent: data.textContent,
+      media: data.media?.length
+        ? { create: data.media.map((m, i) => ({ mediaType: m.mediaType, url: m.url, sortOrder: i })) }
+        : undefined,
+    },
+  });
+  await prisma.interestGroupPost.create({ data: { groupId, postId: post.id } });
+  await bumpUserStats(userId, { postsMade: 1 });
+  return post;
+}
+
+export async function myGroups(userId: number) {
+  return prisma.interestGroup.findMany({
+    where: {
+      isActive: true,
+      OR: [{ creatorId: userId }, { members: { some: { userId, status: 'joined' } } }],
+    },
+    orderBy: { createdAt: 'desc' },
+    include: groupCardInclude,
+  });
 }
 
 // ── Service Providers ────────────────────────────────────────

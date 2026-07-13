@@ -138,7 +138,9 @@ profilesRouter.post(
 );
 
 // Products (SP)
+profilesRouter.get('/me/products', auth, asyncHandler(async (req, res) => ok(res, await service.listMyProducts(req.auth!.sub))));
 profilesRouter.post('/me/products', auth, validate({ body: productSchema }), asyncHandler(async (req, res) => ok(res, await service.addProduct(req.auth!.sub, req.body), 201)));
+profilesRouter.patch('/me/products/:id', auth, validate({ body: productSchema.partial() }), asyncHandler(async (req, res) => ok(res, await service.updateProduct(req.auth!.sub, Number(req.params.id), req.body))));
 profilesRouter.delete('/me/products/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'spProduct', Number(req.params.id)))));
 
 // Delivery + payment (SP)
@@ -146,3 +148,6 @@ profilesRouter.put('/me/delivery', auth, validate({ body: deliverySchema }), asy
 profilesRouter.put('/me/payment-terms', auth, validate({ body: paymentTermsSchema }), asyncHandler(async (req, res) => ok(res, await service.setPaymentTerms(req.auth!.sub, req.body))));
 profilesRouter.post('/me/payment-methods', auth, validate({ body: paymentMethodSchema }), asyncHandler(async (req, res) => ok(res, await service.addPaymentMethod(req.auth!.sub, req.body), 201)));
 profilesRouter.delete('/me/payment-methods/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'spPaymentMethod', Number(req.params.id)))));
+
+// Public profile view (any member). Declared last so it never shadows /me/*.
+profilesRouter.get('/:id', auth, asyncHandler(async (req, res) => ok(res, await service.getPublicProfile(Number(req.params.id)))));
