@@ -225,6 +225,19 @@ serviceProvidersRouter.get(
     ok(res, await service.getServiceProvider(Number(req.params.id))),
   ),
 );
+const slotsQuery = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  days: z.coerce.number().int().min(1).max(90).optional(),
+});
+serviceProvidersRouter.get(
+  '/:id/slots',
+  authenticate('user'),
+  validate({ query: slotsQuery }),
+  asyncHandler(async (req, res) => {
+    const q = getValidatedQuery<z.infer<typeof slotsQuery>>(req);
+    ok(res, await service.getServiceProviderSlots(Number(req.params.id), q.from, q.days));
+  }),
+);
 serviceProvidersRouter.post(
   '/:id/ratings',
   authenticate('user'),

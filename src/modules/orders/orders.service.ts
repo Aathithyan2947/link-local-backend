@@ -4,14 +4,118 @@ import { bumpUserStats } from '../../lib/stats.js';
 import { emitNotification } from '../../lib/notify.js';
 import { mockCharge } from '../../lib/payments.js';
 import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
+import { isSlotOpen, timeToDate, dateOnly } from '../../lib/slots.js';
+import { PLATFORM_FEE } from '../../lib/providerKind.js';
 
 const orderInclude = {
   buyer: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
   spProfile: { select: { id: true, userId: true, name: true, photoUrl: true } },
   items: { include: { product: { select: { id: true, name: true, photoUrl: true, quantityMetric: true } } } },
   payments: { orderBy: { createdAt: 'desc' as const } },
+  scheduledSlot: true,
 };
 
+// ── Fees ─────────────────────────────────────────────────────
+export interface OrderFees {
+  subtotal: number;
+  deliveryCharge: number;
+  packagingCharge: number;
+  platformFee: number;
+  discount: number;
+  total: number;
+  couponId?: number;
+  freeDeliveryThreshold: number | null;
+  freeDeliveryRemaining: number;
+}
+
+/** Fee breakdown for a PRODUCT order (delivery/packaging/platform + coupon). */
+async function computeProductFees(
+  delivery: { deliveryCharge: unknown; packagingCharge: unknown; freeDeliveryThreshold: unknown } | null,
+  subtotal: number,
+  deliveryType: 'home_delivery' | 'pickup',
+  couponCode?: string,
+): Promise<OrderFees> {
+  const threshold = delivery?.freeDeliveryThreshold != null ? Number(delivery.freeDeliveryThreshold) : null;
+  const meetsThreshold = threshold != null && subtotal >= threshold;
+  const deliveryCharge =
+    deliveryType === 'home_delivery' && !meetsThreshold ? Number(delivery?.deliveryCharge ?? 0) : 0;
+  const packagingCharge = Number(delivery?.packagingCharge ?? 0);
+  const platformFee = subtotal > 0 ? PLATFORM_FEE : 0;
+  const coupon = await resolveCoupon(couponCode, subtotal);
+  const discount = coupon?.discount ?? 0;
+  const total = Math.max(subtotal + deliveryCharge + packagingCharge + platformFee - discount, 0);
+  return {
+    subtotal,
+    deliveryCharge,
+    packagingCharge,
+    platformFee,
+    discount,
+    total,
+    couponId: coupon?.couponId,
+    freeDeliveryThreshold: threshold,
+    freeDeliveryRemaining: threshold != null && !meetsThreshold ? Math.max(threshold - subtotal, 0) : 0,
+  };
+}
+
+/** Snapshot + validate product line items against the SP's catalogue. */
+async function buildItemRows(
+  spProfileId: number,
+  items: { productId: number; quantity?: number; customizationNotes?: string }[],
+) {
+  const productIds = items.map((i) => i.productId);
+  const products = await prisma.spProduct.findMany({ where: { id: { in: productIds }, profileId: spProfileId } });
+  if (products.length !== new Set(productIds).size) throw ApiError.badRequest('One or more items are unavailable');
+  const priceOf = new Map(products.map((p) => [p.id, Number(p.price ?? 0)]));
+  return items.map((i) => {
+    const qty = i.quantity && i.quantity > 0 ? i.quantity : 1;
+    const unit = priceOf.get(i.productId) ?? 0;
+    return {
+      productId: i.productId,
+      quantity: qty,
+      unitPrice: unit,
+      totalPrice: Math.round(unit * qty * 100) / 100,
+      customizationNotes: i.customizationNotes,
+    };
+  });
+}
+
+// ── Quote (cart fee breakdown + coupon preview, no persistence) ──
+export interface QuoteInput {
+  spProfileId: number;
+  orderKind?: 'product' | 'booking';
+  items?: { productId: number; quantity?: number }[];
+  rateType?: 'per_session' | 'monthly' | 'hourly';
+  deliveryType?: 'home_delivery' | 'pickup';
+  couponCode?: string;
+}
+
+export async function quoteOrder(data: QuoteInput): Promise<OrderFees> {
+  const sp = await prisma.profile.findUnique({ where: { id: data.spProfileId }, select: { id: true, delivery: true } });
+  if (!sp) throw ApiError.notFound('Service provider not found');
+
+  if (data.orderKind === 'booking') {
+    const rate = await requireRate(data.spProfileId, data.rateType);
+    const coupon = await resolveCoupon(data.couponCode, rate);
+    const discount = coupon?.discount ?? 0;
+    return {
+      subtotal: rate,
+      deliveryCharge: 0,
+      packagingCharge: 0,
+      platformFee: 0,
+      discount,
+      total: Math.max(rate - discount, 0),
+      couponId: coupon?.couponId,
+      freeDeliveryThreshold: null,
+      freeDeliveryRemaining: 0,
+    };
+  }
+
+  const rows = await buildItemRows(data.spProfileId, (data.items ?? []).map((i) => ({ ...i })));
+  const subtotal = rows.reduce((s, r) => s + r.totalPrice, 0);
+  return computeProductFees(sp.delivery, subtotal, data.deliveryType ?? 'pickup', data.couponCode);
+}
+
+// ── Product order ────────────────────────────────────────────
 export interface PlaceOrderInput {
   spProfileId: number;
   items: { productId: number; quantity?: number; customizationNotes?: string }[];
@@ -19,6 +123,7 @@ export interface PlaceOrderInput {
   deliveryAddressId?: number;
   couponCode?: string;
   specialInstructions?: string;
+  scheduledSlot?: { date: string; startTime: string; endTime: string };
 }
 
 export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
@@ -31,66 +136,150 @@ export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
   if (!sp) throw ApiError.notFound('Service provider not found');
   if (sp.userId === buyerId) throw ApiError.badRequest('You cannot order from yourself');
 
-  // Snapshot product prices; validate they belong to this SP.
-  const productIds = data.items.map((i) => i.productId);
-  const products = await prisma.spProduct.findMany({
-    where: { id: { in: productIds }, profileId: data.spProfileId },
-  });
-  const priceOf = new Map(products.map((p) => [p.id, Number(p.price ?? 0)]));
-  if (products.length !== new Set(productIds).size) {
-    throw ApiError.badRequest('One or more items are unavailable');
-  }
-
-  const itemRows = data.items.map((i) => {
-    const qty = i.quantity && i.quantity > 0 ? i.quantity : 1;
-    const unit = priceOf.get(i.productId) ?? 0;
-    return {
-      productId: i.productId,
-      quantity: qty,
-      unitPrice: unit,
-      totalPrice: Math.round(unit * qty * 100) / 100,
-      customizationNotes: i.customizationNotes,
-    };
-  });
-
+  const itemRows = await buildItemRows(data.spProfileId, data.items);
   const subtotal = itemRows.reduce((s, r) => s + r.totalPrice, 0);
   const deliveryType = data.deliveryType ?? 'pickup';
-  const deliveryCharge =
-    deliveryType === 'home_delivery' ? Number(sp.delivery?.deliveryCharge ?? 0) : 0;
-  const coupon = await resolveCoupon(data.couponCode, subtotal);
-  const discount = coupon?.discount ?? 0;
-  const total = Math.max(subtotal + deliveryCharge - discount, 0);
+  const fees = await computeProductFees(sp.delivery, subtotal, deliveryType, data.couponCode);
 
-  const order = await prisma.order.create({
-    data: {
-      buyerId,
-      spProfileId: data.spProfileId,
-      status: 'placed',
-      deliveryType,
-      deliveryAddressId: data.deliveryAddressId,
-      subtotal,
-      deliveryCharge,
-      discountApplied: discount,
-      totalAmount: total,
-      couponId: coupon?.couponId,
-      specialInstructions: data.specialInstructions,
-      items: { create: itemRows },
+  // Each slot is single-booking (capacity 1) — reject if it was taken in the meantime.
+  const slot = data.scheduledSlot;
+  if (slot && !(await isSlotOpen(data.spProfileId, slot))) {
+    throw ApiError.conflict('That time slot was just taken. Please pick another.');
+  }
+
+  const { id: orderId } = await prisma.$transaction(
+    async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          buyerId,
+          spProfileId: data.spProfileId,
+          orderKind: 'product',
+          status: 'placed',
+          deliveryType,
+          deliveryAddressId: data.deliveryAddressId,
+          subtotal,
+          deliveryCharge: fees.deliveryCharge,
+          packagingCharge: fees.packagingCharge,
+          platformFee: fees.platformFee,
+          discountApplied: fees.discount,
+          totalAmount: fees.total,
+          couponId: fees.couponId,
+          specialInstructions: data.specialInstructions,
+          items: { create: itemRows },
+        },
+        select: { id: true },
+      });
+      if (slot) await lockSlot(tx, data.spProfileId, buyerId, created.id, slot);
+      return created;
     },
-    include: orderInclude,
-  });
-  if (coupon) await redeemCoupon(coupon.couponId, buyerId, 'order', order.id);
+    { timeout: 15_000 },
+  );
+  if (fees.couponId) await redeemCoupon(fees.couponId, buyerId, 'order', orderId);
 
   await emitNotification({
     userId: sp.userId,
     title: 'New order',
-    body: `You received a new order (₹${total.toFixed(0)})`,
+    body: `You received a new order (₹${fees.total.toFixed(0)})`,
     type: 'order_update',
     entityType: 'order',
-    entityId: order.id,
+    entityId: orderId,
   });
-  return order;
+  return prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
 }
 
+// ── Service booking (request → accept → pay) ─────────────────
+export interface PlaceBookingInput {
+  spProfileId: number;
+  rateType: 'per_session' | 'monthly' | 'hourly';
+  scheduledSlot?: { date: string; startTime: string; endTime: string };
+  couponCode?: string;
+  note?: string;
+}
+
+const RATE_LABEL: Record<string, string> = { per_session: 'per session', monthly: 'monthly', hourly: 'hourly' };
+
+async function requireRate(spProfileId: number, rateType?: string): Promise<number> {
+  if (!rateType) throw ApiError.badRequest('Pick a rate');
+  const rate = await prisma.spRate.findFirst({ where: { profileId: spProfileId, rateType, isActive: true } });
+  if (!rate) throw ApiError.badRequest('That rate is unavailable');
+  return Number(rate.amount);
+}
+
+export async function placeBooking(buyerId: number, data: PlaceBookingInput) {
+  const sp = await prisma.profile.findUnique({ where: { id: data.spProfileId }, select: { id: true, userId: true } });
+  if (!sp) throw ApiError.notFound('Service provider not found');
+  if (sp.userId === buyerId) throw ApiError.badRequest('You cannot book yourself');
+
+  const rateAmount = await requireRate(data.spProfileId, data.rateType);
+  const coupon = await resolveCoupon(data.couponCode, rateAmount);
+  const discount = coupon?.discount ?? 0;
+  const total = Math.max(rateAmount - discount, 0);
+
+  const slot = data.scheduledSlot;
+  if (slot && !(await isSlotOpen(data.spProfileId, slot))) {
+    throw ApiError.conflict('That time slot was just taken. Please pick another.');
+  }
+
+  const { id: orderId } = await prisma.$transaction(
+    async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          buyerId,
+          spProfileId: data.spProfileId,
+          orderKind: 'booking',
+          status: 'requested',
+          subtotal: rateAmount,
+          rateType: data.rateType,
+          rateAmount,
+          discountApplied: discount,
+          totalAmount: total,
+          couponId: coupon?.couponId,
+          specialInstructions: data.note,
+        },
+        select: { id: true },
+      });
+      if (slot) await lockSlot(tx, data.spProfileId, buyerId, created.id, slot);
+      return created;
+    },
+    { timeout: 15_000 },
+  );
+  if (coupon) await redeemCoupon(coupon.couponId, buyerId, 'order', orderId);
+
+  await emitNotification({
+    userId: sp.userId,
+    title: 'New booking request',
+    body: `You have a new ${RATE_LABEL[data.rateType]} booking request`,
+    type: 'enquiry',
+    entityType: 'order',
+    entityId: orderId,
+  });
+  return prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
+}
+
+/** Materialize + lock a slot for an order (used by both product and booking placement). */
+async function lockSlot(
+  tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+  spProfileId: number,
+  buyerId: number,
+  orderId: number,
+  slot: { date: string; startTime: string; endTime: string },
+) {
+  const booked = await tx.spScheduleSlot.create({
+    data: {
+      profileId: spProfileId,
+      slotDate: dateOnly(slot.date),
+      startTime: timeToDate(slot.startTime),
+      endTime: timeToDate(slot.endTime),
+      isAvailable: false,
+      bookedBy: buyerId,
+      orderId,
+    },
+    select: { id: true },
+  });
+  await tx.order.update({ where: { id: orderId }, data: { scheduledSlotId: booked.id } });
+}
+
+// ── Reads ────────────────────────────────────────────────────
 export async function getOrder(id: number, viewerId: number) {
   const order = await prisma.order.findUnique({ where: { id }, include: orderInclude });
   if (!order) throw ApiError.notFound('Order not found');
@@ -112,6 +301,67 @@ export async function incomingOrders(spUserId: number) {
   });
 }
 
+// ── Accept / Reject (SP) ─────────────────────────────────────
+async function requireSpOrder(orderId: number, spUserId: number) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { spProfile: { select: { userId: true } } },
+  });
+  if (!order) throw ApiError.notFound('Order not found');
+  if (order.spProfile.userId !== spUserId) throw ApiError.forbidden('Not your order');
+  return order;
+}
+
+/** SP accepts: product placed→confirmed; booking requested→accepted (buyer then pays). */
+export async function acceptOrder(orderId: number, spUserId: number) {
+  const order = await requireSpOrder(orderId, spUserId);
+  const isBooking = order.orderKind === 'booking';
+  const from = isBooking ? 'requested' : 'placed';
+  if (order.status !== from) throw ApiError.badRequest(`Cannot accept an order that is ${order.status}`);
+  const updated = await prisma.order.update({
+    where: { id: orderId },
+    data: {
+      status: isBooking ? 'accepted' : 'confirmed',
+      acceptedAt: new Date(),
+      ...(isBooking ? {} : { confirmedAt: new Date() }),
+    },
+    include: orderInclude,
+  });
+  await emitNotification({
+    userId: order.buyerId,
+    title: isBooking ? 'Request confirmed' : 'Order accepted',
+    body: isBooking ? 'Your booking request was accepted — confirm & pay to finalise.' : `Order #${orderId} was accepted`,
+    type: 'order_update',
+    entityType: 'order',
+    entityId: orderId,
+  });
+  return updated;
+}
+
+/** SP rejects: frees any held slot and notifies the buyer. */
+export async function rejectOrder(orderId: number, spUserId: number, reason?: string) {
+  const order = await requireSpOrder(orderId, spUserId);
+  if (['completed', 'cancelled', 'rejected'].includes(order.status)) {
+    throw ApiError.badRequest(`Cannot reject an order that is ${order.status}`);
+  }
+  const updated = await prisma.order.update({
+    where: { id: orderId },
+    data: { status: 'rejected', rejectedAt: new Date(), cancellationReason: reason },
+    include: orderInclude,
+  });
+  await freeSlot(orderId);
+  await emitNotification({
+    userId: order.buyerId,
+    title: order.orderKind === 'booking' ? 'Request declined' : 'Order declined',
+    body: `Your request was declined${reason ? `: ${reason}` : ''}`,
+    type: 'order_update',
+    entityType: 'order',
+    entityId: orderId,
+  });
+  return updated;
+}
+
+// ── Fulfilment status (SP) + cancel (buyer/SP) ───────────────
 const STATUS_FLOW = ['placed', 'confirmed', 'in_progress', 'delivered', 'completed'];
 const STAMP: Record<string, string> = {
   confirmed: 'confirmedAt',
@@ -120,12 +370,7 @@ const STAMP: Record<string, string> = {
   cancelled: 'cancelledAt',
 };
 
-export async function updateOrderStatus(
-  orderId: number,
-  actorUserId: number,
-  status: string,
-  reason?: string,
-) {
+export async function updateOrderStatus(orderId: number, actorUserId: number, status: string, reason?: string) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: { spProfile: { select: { userId: true } } },
@@ -138,7 +383,7 @@ export async function updateOrderStatus(
 
   // Buyers may only cancel; SPs drive the fulfilment flow.
   if (status === 'cancelled') {
-    if (!isBuyer && !isSp) throw ApiError.forbidden('Cannot cancel');
+    // allowed for either party
   } else if (!isSp) {
     throw ApiError.forbidden('Only the seller can update this order');
   } else if (!STATUS_FLOW.includes(status)) {
@@ -155,10 +400,10 @@ export async function updateOrderStatus(
     include: orderInclude,
   });
 
-  if (status === 'completed') {
-    await bumpUserStats(order.spProfile.userId, { ordersReceived: 1 });
-  }
-  // Notify the counterparty.
+  if (status === 'completed') await bumpUserStats(order.spProfile.userId, { ordersReceived: 1 });
+  // Cancelling frees any slot this order held so it re-opens for other residents.
+  if (status === 'cancelled') await freeSlot(orderId);
+
   const notifyUser = isSp ? order.buyerId : order.spProfile.userId;
   await emitNotification({
     userId: notifyUser,
@@ -171,13 +416,29 @@ export async function updateOrderStatus(
   return updated;
 }
 
-export async function payOrder(orderId: number, buyerId: number, paymentType = 'advance') {
+async function freeSlot(orderId: number) {
+  await prisma.spScheduleSlot.updateMany({
+    where: { orderId, isAvailable: false },
+    data: { isAvailable: true, bookedBy: null, orderId: null },
+  });
+}
+
+// ── Payment (MOCK gateway) ───────────────────────────────────
+export async function payOrder(
+  orderId: number,
+  buyerId: number,
+  opts: { paymentType?: string; paymentMethod?: string } = {},
+) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: { spProfile: { select: { userId: true } } },
   });
   if (!order) throw ApiError.notFound('Order not found');
   if (order.buyerId !== buyerId) throw ApiError.forbidden('Not your order');
+  // A booking must be accepted by the SP before the resident can pay.
+  if (order.orderKind === 'booking' && order.status !== 'accepted') {
+    throw ApiError.badRequest('This booking is not ready for payment yet');
+  }
 
   const amount = Number(order.totalAmount);
   const charge = mockCharge(amount); // MOCK gateway
@@ -185,13 +446,17 @@ export async function payOrder(orderId: number, buyerId: number, paymentType = '
     data: {
       orderId,
       amount,
-      paymentType,
-      paymentMethod: 'upi',
+      paymentType: opts.paymentType ?? 'advance',
+      paymentMethod: opts.paymentMethod ?? 'upi',
       paymentStatus: 'paid',
       transactionRef: charge.transactionRef,
       paidAt: charge.paidAt,
     },
   });
+  // Paying a booking confirms it.
+  if (order.orderKind === 'booking' && order.status === 'accepted') {
+    await prisma.order.update({ where: { id: orderId }, data: { status: 'confirmed', confirmedAt: new Date() } });
+  }
   await bumpUserStats(order.spProfile.userId, { paymentReceivedTotal: amount });
   await emitNotification({
     userId: order.spProfile.userId,

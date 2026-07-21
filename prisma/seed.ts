@@ -58,9 +58,10 @@ async function main() {
 
   // ── Service categories + subcategories (from sheet) ────────
   const subcatByName = new Map<string, number>();
-  for (const { category: catName, types } of serviceCategories) {
+  for (const { category: catName, types, kind } of serviceCategories) {
     let category = await prisma.serviceCategory.findFirst({ where: { name: catName } });
-    if (!category) category = await prisma.serviceCategory.create({ data: { name: catName } });
+    if (!category) category = await prisma.serviceCategory.create({ data: { name: catName, kind: kind ?? 'service' } });
+    else if (kind && category.kind !== kind) category = await prisma.serviceCategory.update({ where: { id: category.id }, data: { kind } });
     for (const subName of types) {
       let sub = await prisma.serviceSubcategory.findFirst({
         where: { name: subName, categoryId: category.id },

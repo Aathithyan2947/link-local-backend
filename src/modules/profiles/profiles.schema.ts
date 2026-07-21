@@ -93,6 +93,40 @@ export const deliverySchema = z.object({
   deliveryTimeMinutes: z.number().int().optional(),
   offersPickup: z.boolean().optional(),
   deliveryNotes: z.string().optional(),
+  packagingCharge: z.number().nonnegative().optional(),
+  freeDeliveryThreshold: z.number().nonnegative().optional(),
+  orderLeadTimeHours: z.number().int().nonnegative().optional(),
+});
+
+// Service SP charges — the resident picks one when booking (per session / monthly / hourly).
+export const ratesSchema = z.object({
+  rates: z
+    .array(
+      z.object({
+        rateType: z.enum(['per_session', 'monthly', 'hourly']),
+        amount: z.number().nonnegative(),
+      }),
+    )
+    .default([]),
+});
+
+const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be HH:MM (24h)');
+
+export const availabilitySchema = z
+  .object({
+    workingDays: z.array(z.number().int().min(0).max(6)).min(1, 'Pick at least one day'),
+    startTime: hhmm,
+    endTime: hhmm,
+    slotMinutes: z.number().int().positive().max(24 * 60).nullable().optional(),
+    willingToTravel: z.boolean().optional(),
+    maxTravelKm: z.number().nonnegative().optional(),
+    horizonDays: z.number().int().min(1).max(90).optional(),
+  })
+  .refine((v) => v.endTime > v.startTime, { message: 'End time must be after start time', path: ['endTime'] });
+
+export const blackoutSchema = z.object({
+  unavailableDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD'),
+  reason: z.enum(['holiday', 'personal', 'other']).optional(),
 });
 
 export const paymentTermsSchema = z.object({

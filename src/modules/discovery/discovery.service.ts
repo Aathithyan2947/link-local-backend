@@ -6,6 +6,13 @@ import { bumpUserStats } from '../../lib/stats.js';
 import { emitNotification } from '../../lib/notify.js';
 import { mockCharge } from '../../lib/payments.js';
 import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
+import { computeOpenSlots } from '../../lib/slots.js';
+import { resolveProviderKind } from '../../lib/providerKind.js';
+
+/** Open, bookable slots for an SP (for the resident's schedule view + checkout). */
+export async function getServiceProviderSlots(id: number, from?: string, days?: number) {
+  return computeOpenSlots(id, from, days);
+}
 
 /** Parses an ISO date/time string into a Date, or null. Used for @db.Time/@db.Date. */
 function parseDate(v: string | undefined | null): Date | null {
@@ -657,8 +664,10 @@ export async function getServiceProvider(id: number) {
       professions: { include: { professionMaster: true } },
       serviceTypes: { include: { subcategory: { include: { category: true } } } },
       products: { where: { isAvailable: true }, orderBy: { sortOrder: 'asc' } },
+      rates: { where: { isActive: true }, orderBy: { id: 'asc' } },
       media: { orderBy: { sortOrder: 'asc' } },
       delivery: true,
+      availability: true,
       paymentTerms: true,
       ratings: {
         orderBy: { createdAt: 'desc' },
@@ -735,6 +744,7 @@ export async function getServiceProvider(id: number) {
 
   return {
     ...sp,
+    providerKind: await resolveProviderKind(id),
     ratingAvg: round1(ragg._avg.rating),
     ratingCount: ragg._count.rating,
     events,

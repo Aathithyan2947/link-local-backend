@@ -1,9 +1,14 @@
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
+import { dateOnly } from '../../lib/slots.js';
+import { resolveProviderKind } from '../../lib/providerKind.js';
 import type { z } from 'zod';
 import type {
+  availabilitySchema,
+  blackoutSchema,
   contactSchema,
   deliverySchema,
+  ratesSchema,
   educationSchema,
   familySchema,
   hobbySchema,
@@ -36,14 +41,36 @@ export async function getMyProfile(userId: number) {
       contactDetails: true,
       serviceTypes: { include: { subcategory: { include: { category: true } } } },
       products: { orderBy: { sortOrder: 'asc' } },
+      rates: { where: { isActive: true } },
       delivery: true,
+      availability: true,
       paymentTerms: true,
       paymentMethods: true,
       completion: true,
     },
   });
   if (!profile) throw ApiError.notFound('Profile not found');
-  return profile;
+  const providerKind = await resolveProviderKind(profile.id);
+  return { ...profile, providerKind };
+}
+
+// ── Service SP rates (per session / monthly / hourly) ────────
+export async function getMyRates(userId: number) {
+  const profile = await requireProfile(userId);
+  return prisma.spRate.findMany({ where: { profileId: profile.id, isActive: true }, orderBy: { id: 'asc' } });
+}
+
+export async function setRates(userId: number, input: z.infer<typeof ratesSchema>) {
+  const profile = await requireProfile(userId);
+  // Replace-all (like setServiceTypes): one active row per rateType.
+  const seen = new Set<string>();
+  const rows = input.rates.filter((r) => (seen.has(r.rateType) ? false : (seen.add(r.rateType), true)));
+  await prisma.$transaction([
+    prisma.spRate.deleteMany({ where: { profileId: profile.id } }),
+    prisma.spRate.createMany({ data: rows.map((r) => ({ profileId: profile.id, rateType: r.rateType, amount: r.amount })) }),
+  ]);
+  await recomputeCompletion(profile.id);
+  return prisma.spRate.findMany({ where: { profileId: profile.id, isActive: true }, orderBy: { id: 'asc' } });
 }
 
 /** Public profile view (the "User" frame) — any member viewing another member. */
@@ -446,6 +473,54 @@ export async function setDelivery(userId: number, input: z.infer<typeof delivery
   return row;
 }
 
+// ── Availability (weekly template) + blackout dates ──────────
+export async function getMyAvailability(userId: number) {
+  const profile = await requireProfile(userId);
+  const [availability, blackouts] = await Promise.all([
+    prisma.spAvailability.findUnique({ where: { profileId: profile.id } }),
+    prisma.spUnavailability.findMany({ where: { profileId: profile.id }, orderBy: { unavailableDate: 'asc' } }),
+  ]);
+  return { availability, blackouts };
+}
+
+export async function setAvailability(userId: number, input: z.infer<typeof availabilitySchema>) {
+  const profile = await requireProfile(userId);
+  const data = {
+    workingDays: Array.from(new Set(input.workingDays)).sort((a, b) => a - b),
+    startTime: input.startTime,
+    endTime: input.endTime,
+    slotMinutes: input.slotMinutes ?? null,
+    willingToTravel: input.willingToTravel ?? false,
+    maxTravelKm: input.maxTravelKm,
+    horizonDays: input.horizonDays ?? 14,
+  };
+  return prisma.spAvailability.upsert({
+    where: { profileId: profile.id },
+    update: data,
+    create: { profileId: profile.id, ...data },
+  });
+}
+
+export async function addBlackout(userId: number, input: z.infer<typeof blackoutSchema>) {
+  const profile = await requireProfile(userId);
+  return prisma.spUnavailability.create({
+    data: { profileId: profile.id, unavailableDate: dateOnly(input.unavailableDate), reason: input.reason },
+  });
+}
+
+export async function listBlackouts(userId: number) {
+  const profile = await requireProfile(userId);
+  return prisma.spUnavailability.findMany({ where: { profileId: profile.id }, orderBy: { unavailableDate: 'asc' } });
+}
+
+export async function deleteBlackout(userId: number, id: number) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.spUnavailability.findUnique({ where: { id } });
+  if (!row || row.profileId !== profile.id) throw ApiError.notFound();
+  await prisma.spUnavailability.delete({ where: { id } });
+  return { id, deleted: true };
+}
+
 export async function setPaymentTerms(userId: number, input: z.infer<typeof paymentTermsSchema>) {
   const profile = await requireProfile(userId);
   return prisma.spPaymentTerm.upsert({
@@ -476,6 +551,7 @@ export async function recomputeCompletion(profileId: number) {
           contactDetails: true,
           serviceTypes: true,
           products: true,
+          rates: true,
           paymentMethods: true,
         },
       },
@@ -485,6 +561,8 @@ export async function recomputeCompletion(profileId: number) {
   if (!profile) return;
 
   const isSP = profile.user.userType === 'service_provider';
+  const kind = isSP ? await resolveProviderKind(profileId) : 'service';
+  const isService = kind === 'service';
   const flags = {
     hasPhoto: !!profile.photoUrl,
     hasAddress: !!profile.addressId,
@@ -493,13 +571,16 @@ export async function recomputeCompletion(profileId: number) {
     hasProfession: profile._count.professions > 0,
     hasContactDetails: profile._count.contactDetails > 0,
     hasServiceTypes: profile._count.serviceTypes > 0,
-    hasProducts: profile._count.products > 0,
+    // For a service SP, "catalogue" completion means published rates; delivery prefs don't apply.
+    hasProducts: isService ? profile._count.rates > 0 : profile._count.products > 0,
     hasDeliveryPrefs: !!profile.delivery,
     hasPaymentMethods: profile._count.paymentMethods > 0,
   };
 
   const applicable = isSP
-    ? ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails', 'hasServiceTypes', 'hasProducts', 'hasDeliveryPrefs', 'hasPaymentMethods']
+    ? isService
+      ? ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails', 'hasServiceTypes', 'hasProducts', 'hasPaymentMethods']
+      : ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails', 'hasServiceTypes', 'hasProducts', 'hasDeliveryPrefs', 'hasPaymentMethods']
     : ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails'];
   const filled = applicable.filter((k) => flags[k as keyof typeof flags]).length;
   const completionPercent = Math.round((filled / applicable.length) * 100);

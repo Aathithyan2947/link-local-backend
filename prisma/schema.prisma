@@ -72,6 +72,7 @@ model Area {
 model ServiceCategory {
   id        Int      @id @default(autoincrement())
   name      String
+  kind      String   @default("service") // product (menu/cart, e.g. Food) | service (charges/booking)
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -605,11 +606,13 @@ model Profile {
   serviceTypes     ProfileServiceType[]
   media            ProfileMedia[]
   products         SpProduct[]
+  rates            SpRate[]
   delivery         SpDeliveryPreference?
   unavailability   SpUnavailability[]
   paymentMethods   SpPaymentMethod[]
   paymentTerms     SpPaymentTerm?
   scheduleSlots    SpScheduleSlot[]
+  availability     SpAvailability?
   ratings          ServiceProviderRating[]
   orders           Order[]
 
@@ -824,11 +827,29 @@ model SpDeliveryPreference {
   offersPickup        Boolean  @default(false) @map("offers_pickup")
   pickupAddressId     Int?     @map("pickup_address_id")
   deliveryNotes       String?  @map("delivery_notes")
+  packagingCharge      Decimal? @map("packaging_charge") @db.Decimal(10, 2)
+  freeDeliveryThreshold Decimal? @map("free_delivery_threshold") @db.Decimal(10, 2)
+  orderLeadTimeHours   Int?     @map("order_lead_time_hours") // Figma "1 day / 12 hours in advance"
 
   profile       Profile  @relation(fields: [profileId], references: [id])
   pickupAddress Address? @relation(fields: [pickupAddressId], references: [id])
 
   @@map("sp_delivery_preferences")
+}
+
+/// Service (non-product) SP pricing. A tutor/coach can publish several rates; the
+/// resident picks one when booking a session.
+model SpRate {
+  id        Int      @id @default(autoincrement())
+  profileId Int      @map("profile_id")
+  rateType  String   @map("rate_type") // per_session | monthly | hourly
+  amount    Decimal  @db.Decimal(10, 2)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("sp_rates")
 }
 
 model SpUnavailability {
@@ -886,6 +907,27 @@ model SpScheduleSlot {
   ordersScheduled Order[] @relation("OrderScheduledSlot")
 
   @@map("sp_schedule_slots")
+}
+
+/// Weekly availability template an SP publishes. Bookable date-specific slots are generated
+/// from this over a rolling horizon; a materialized SpScheduleSlot is created only when a
+/// resident books one. Times are "HH:MM" (24h). Blackout dates live in SpUnavailability.
+model SpAvailability {
+  id              Int      @id @default(autoincrement())
+  profileId       Int      @unique @map("profile_id")
+  workingDays     Int[]    @map("working_days") // 0=Sun … 6=Sat
+  startTime       String   @map("start_time") // "HH:MM"
+  endTime         String   @map("end_time") // "HH:MM"
+  slotMinutes     Int?     @map("slot_minutes") // null ⇒ one slot spanning the whole daily window
+  willingToTravel Boolean  @default(false) @map("willing_to_travel")
+  maxTravelKm     Decimal? @map("max_travel_km") @db.Decimal(5, 2)
+  horizonDays     Int      @default(14) @map("horizon_days")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@map("sp_availability")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1515,17 +1557,25 @@ model Order {
   id                  Int       @id @default(autoincrement())
   buyerId             Int       @map("buyer_id")
   spProfileId         Int       @map("sp_profile_id")
-  status              String // placed | confirmed | in_progress | delivered | completed | cancelled | refund_requested
+  orderKind           String    @default("product") @map("order_kind") // product (menu items) | booking (service session)
+  status              String // product: placed|confirmed|in_progress|delivered|completed  booking: requested|accepted|confirmed|completed  (+rejected|cancelled|refund_requested)
   deliveryType        String?   @map("delivery_type") // home_delivery | pickup
   deliveryAddressId   Int?      @map("delivery_address_id")
   scheduledSlotId     Int?      @map("scheduled_slot_id")
   subtotal            Decimal   @db.Decimal(10, 2)
   deliveryCharge      Decimal   @default(0) @map("delivery_charge") @db.Decimal(10, 2)
+  packagingCharge     Decimal   @default(0) @map("packaging_charge") @db.Decimal(10, 2)
+  platformFee         Decimal   @default(0) @map("platform_fee") @db.Decimal(10, 2)
   discountApplied     Decimal   @default(0) @map("discount_applied") @db.Decimal(10, 2)
   totalAmount         Decimal   @map("total_amount") @db.Decimal(10, 2)
+  // Booking (service) orders: the rate the resident chose.
+  rateType            String?   @map("rate_type") // per_session | monthly | hourly
+  rateAmount          Decimal?  @map("rate_amount") @db.Decimal(10, 2)
   couponId            Int?      @map("coupon_id")
   specialInstructions String?   @map("special_instructions")
   placedAt            DateTime  @default(now()) @map("placed_at")
+  acceptedAt          DateTime? @map("accepted_at")
+  rejectedAt          DateTime? @map("rejected_at")
   confirmedAt         DateTime? @map("confirmed_at")
   deliveredAt         DateTime? @map("delivered_at")
   completedAt         DateTime? @map("completed_at")

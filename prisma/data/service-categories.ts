@@ -4,11 +4,13 @@
 export interface CategorySeed {
   category: string;
   types: string[];
+  kind?: 'product' | 'service'; // 'product' = menu/cart flow (Food); default 'service' = charges/booking
 }
 
 export const serviceCategories: CategorySeed[] = [
   {
     category: 'Food',
+    kind: 'product',
     types: [
       'Home baker',
       'Tiffin service',

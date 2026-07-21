@@ -9,6 +9,8 @@ import { prisma } from '../../lib/prisma.js';
 import { upload, fileUrl } from '../../middleware/upload.js';
 import * as service from './profiles.service.js';
 import {
+  availabilitySchema,
+  blackoutSchema,
   contactSchema,
   customFieldsSchema,
   deliverySchema,
@@ -19,6 +21,7 @@ import {
   paymentTermsSchema,
   productSchema,
   professionSchema,
+  ratesSchema,
   serviceTypesSchema,
   updateProfileSchema,
 } from './profiles.schema.js';
@@ -142,6 +145,17 @@ profilesRouter.get('/me/products', auth, asyncHandler(async (req, res) => ok(res
 profilesRouter.post('/me/products', auth, validate({ body: productSchema }), asyncHandler(async (req, res) => ok(res, await service.addProduct(req.auth!.sub, req.body), 201)));
 profilesRouter.patch('/me/products/:id', auth, validate({ body: productSchema.partial() }), asyncHandler(async (req, res) => ok(res, await service.updateProduct(req.auth!.sub, Number(req.params.id), req.body))));
 profilesRouter.delete('/me/products/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'spProduct', Number(req.params.id)))));
+
+// Service charges / rates (service SP)
+profilesRouter.get('/me/rates', auth, asyncHandler(async (req, res) => ok(res, await service.getMyRates(req.auth!.sub))));
+profilesRouter.put('/me/rates', auth, validate({ body: ratesSchema }), asyncHandler(async (req, res) => ok(res, await service.setRates(req.auth!.sub, req.body))));
+
+// Availability (weekly template) + blackout dates (SP)
+profilesRouter.get('/me/availability', auth, asyncHandler(async (req, res) => ok(res, await service.getMyAvailability(req.auth!.sub))));
+profilesRouter.put('/me/availability', auth, validate({ body: availabilitySchema }), asyncHandler(async (req, res) => ok(res, await service.setAvailability(req.auth!.sub, req.body))));
+profilesRouter.get('/me/availability/blackouts', auth, asyncHandler(async (req, res) => ok(res, await service.listBlackouts(req.auth!.sub))));
+profilesRouter.post('/me/availability/blackouts', auth, validate({ body: blackoutSchema }), asyncHandler(async (req, res) => ok(res, await service.addBlackout(req.auth!.sub, req.body), 201)));
+profilesRouter.delete('/me/availability/blackouts/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteBlackout(req.auth!.sub, Number(req.params.id)))));
 
 // Delivery + payment (SP)
 profilesRouter.put('/me/delivery', auth, validate({ body: deliverySchema }), asyncHandler(async (req, res) => ok(res, await service.setDelivery(req.auth!.sub, req.body))));
