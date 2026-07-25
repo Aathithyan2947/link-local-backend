@@ -85,6 +85,7 @@ model ServiceSubcategory {
   id         Int     @id @default(autoincrement())
   categoryId Int     @map("category_id")
   name       String
+  type       String? @map("type") // menu | date | null  — controls which SP features are shown
   isActive   Boolean @default(true) @map("is_active")
 
   category     ServiceCategory           @relation(fields: [categoryId], references: [id])

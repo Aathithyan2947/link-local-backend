@@ -24,6 +24,7 @@ export const serviceCategorySchema = z.object({
 export const serviceSubcategorySchema = z.object({
   categoryId: z.number().int(),
   name: z.string().min(1),
+  type: z.enum(['menu', 'date']).nullable().optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -31,7 +32,9 @@ export const subcategoryFieldSchema = z.object({
   subcategoryId: z.number().int(),
   fieldName: z.string().min(1),
   // 'file' lets a subcategory require an upload such as a menu card / rate card.
-  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file']),
+  // 'menu' signals that this subcategory uses the product/menu feature in the app.
+  // 'date' signals that this subcategory uses date-based slot booking.
+  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file', 'menu']),
   fieldOptions: z.string().optional(),
   isRequired: z.boolean().optional(),
   sortOrder: z.number().int().optional(),

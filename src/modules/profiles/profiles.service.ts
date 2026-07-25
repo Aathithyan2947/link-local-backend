@@ -1,7 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { dateOnly } from '../../lib/slots.js';
-import { resolveProviderKind } from '../../lib/providerKind.js';
+import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
 import type { z } from 'zod';
 import type {
   availabilitySchema,
@@ -51,7 +51,8 @@ export async function getMyProfile(userId: number) {
   });
   if (!profile) throw ApiError.notFound('Profile not found');
   const providerKind = await resolveProviderKind(profile.id);
-  return { ...profile, providerKind };
+  const { hasMenu, hasDateBooking } = await resolveProviderFeatures(profile.id);
+  return { ...profile, providerKind, hasMenu, hasDateBooking };
 }
 
 // ── Service SP rates (per session / monthly / hourly) ────────

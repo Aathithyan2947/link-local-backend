@@ -7,7 +7,7 @@ import { emitNotification } from '../../lib/notify.js';
 import { mockCharge } from '../../lib/payments.js';
 import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
 import { computeOpenSlots } from '../../lib/slots.js';
-import { resolveProviderKind } from '../../lib/providerKind.js';
+import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
 
 /** Open, bookable slots for an SP (for the resident's schedule view + checkout). */
 export async function getServiceProviderSlots(id: number, from?: string, days?: number) {
@@ -662,7 +662,16 @@ export async function getServiceProvider(id: number) {
       address: { include: { area: { include: { city: true } } } },
       educations: true,
       professions: { include: { professionMaster: true } },
-      serviceTypes: { include: { subcategory: { include: { category: true } } } },
+      serviceTypes: {
+        include: {
+          subcategory: {
+            include: {
+              category: true,
+              fields: { where: { isActive: true }, select: { fieldType: true } },
+            },
+          },
+        },
+      },
       products: { where: { isAvailable: true }, orderBy: { sortOrder: 'asc' } },
       rates: { where: { isActive: true }, orderBy: { id: 'asc' } },
       media: { orderBy: { sortOrder: 'asc' } },
@@ -742,9 +751,12 @@ export async function getServiceProvider(id: number) {
       .map((m) => ({ ...m.group, role: 'member' as const })),
   ];
 
+  const { hasMenu, hasDateBooking } = await resolveProviderFeatures(id);
   return {
     ...sp,
     providerKind: await resolveProviderKind(id),
+    hasMenu,
+    hasDateBooking,
     ratingAvg: round1(ragg._avg.rating),
     ratingCount: ragg._count.rating,
     events,

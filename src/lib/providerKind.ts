@@ -1,25 +1,53 @@
 import { prisma } from './prisma.js';
 
-/**
- * A Service Provider is either a **product** SP (bakery/food — sells menu items, cart flow)
- * or a **service** SP (tutor/coach — publishes charges, takes session bookings). The kind is
- * driven by the top-level ServiceCategory of the SP's primary service type
- * (`ServiceCategory.kind`), defaulting to 'service' when the SP hasn't picked a category yet.
- */
 export type ProviderKind = 'product' | 'service';
 
-/** Platform fee applied to product orders (flat, in ₹). Mock economics — tune freely. */
+/** Platform fee applied to product orders (flat, in ₹). */
 export const PLATFORM_FEE = 20;
 
-/** Resolve the provider kind for a profile from its service categories. */
-export async function resolveProviderKind(profileId: number): Promise<ProviderKind> {
+/**
+ * Resolves which features a service provider has enabled, based on their
+ * selected subcategories. Two signals are combined:
+ *
+ *  1. `ServiceSubcategory.type` — explicit flag set in the subcategory edit modal
+ *  2. `ServiceSubcategoryField.fieldType` — onboarding fields with type 'menu' or 'date'
+ *
+ *  - `menu`  → SP can add menu items; residents see cart flow
+ *  - `date`  → SP can publish availability slots; residents see slot picker + booking
+ */
+export async function resolveProviderFeatures(profileId: number): Promise<{ hasMenu: boolean; hasDateBooking: boolean }> {
   const types = await prisma.profileServiceType.findMany({
     where: { profileId },
-    select: { subcategory: { select: { category: { select: { kind: true } } } } },
+    select: {
+      subcategory: {
+        select: {
+          type: true,
+          fields: { where: { isActive: true }, select: { fieldType: true } },
+        },
+      },
+    },
   });
-  // A single 'product' category (e.g. Food) makes the SP a product seller.
-  for (const t of types) {
-    if (t.subcategory.category.kind === 'product') return 'product';
+
+  let hasMenu = false;
+  let hasDateBooking = false;
+
+  for (const { subcategory } of types) {
+    // Signal 1: explicit subcategory.type column
+    if (subcategory.type === 'menu') hasMenu = true;
+    if (subcategory.type === 'date') hasDateBooking = true;
+
+    // Signal 2: onboarding field with fieldType 'menu' or 'date'
+    for (const field of subcategory.fields) {
+      if (field.fieldType === 'menu') hasMenu = true;
+      if (field.fieldType === 'date') hasDateBooking = true;
+    }
   }
-  return 'service';
+
+  return { hasMenu, hasDateBooking };
+}
+
+/** Backward-compat shim — callers that only need the binary string. */
+export async function resolveProviderKind(profileId: number): Promise<ProviderKind> {
+  const { hasMenu } = await resolveProviderFeatures(profileId);
+  return hasMenu ? 'product' : 'service';
 }
