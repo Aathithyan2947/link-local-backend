@@ -24,6 +24,7 @@ const placeSchema = z.object({
   deliveryAddressId: z.coerce.number().int().optional(),
   couponCode: z.string().optional(),
   specialInstructions: z.string().max(1000).optional(),
+  deliveryTimeWindow: z.string().max(100).optional(),
   scheduledSlot: z
     .object({
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -68,8 +69,21 @@ const quoteSchema = z.object({
 
 const reasonSchema = z.object({ reason: z.string().max(500).optional() });
 
+const directPaymentSchema = z.object({
+  spProfileId: z.coerce.number().int(),
+  amount: z.coerce.number().positive().max(1_000_000),
+});
+
 ordersRouter.post('/', auth, validate({ body: placeSchema }), asyncHandler(async (req, res) => ok(res, await service.placeOrder(req.auth!.sub, req.body), 201)));
 ordersRouter.post('/bookings', auth, validate({ body: bookingSchema }), asyncHandler(async (req, res) => ok(res, await service.placeBooking(req.auth!.sub, req.body), 201)));
+ordersRouter.post(
+  '/direct-payment',
+  auth,
+  validate({ body: directPaymentSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.createDirectPayment(req.auth!.sub, req.body.spProfileId, req.body.amount), 201),
+  ),
+);
 ordersRouter.post('/quote', auth, validate({ body: quoteSchema }), asyncHandler(async (req, res) => ok(res, await service.quoteOrder(req.body))));
 ordersRouter.get('/mine', auth, asyncHandler(async (req, res) => ok(res, await service.myOrders(req.auth!.sub))));
 ordersRouter.get('/incoming', auth, asyncHandler(async (req, res) => ok(res, await service.incomingOrders(req.auth!.sub))));

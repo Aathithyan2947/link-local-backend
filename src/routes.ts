@@ -15,10 +15,12 @@ import { mediaRouter } from './modules/media/media.routes.js';
 import { ordersRouter } from './modules/orders/orders.routes.js';
 import { messagesRouter } from './modules/messages/messages.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
+import { usersRouter } from './modules/users/users.routes.js';
 
 export const router = Router();
 
 router.use('/auth', authRouter);
+router.use('/users', usersRouter);
 router.use('/masters', mastersRouter);
 router.use('/addresses', addressesRouter);
 router.use('/profiles', profilesRouter);

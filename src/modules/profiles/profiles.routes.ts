@@ -19,10 +19,13 @@ import {
   hobbySchema,
   paymentMethodSchema,
   paymentTermsSchema,
+  privacySchema,
   productSchema,
   professionSchema,
   ratesSchema,
+  reportProfileSchema,
   serviceTypesSchema,
+  updateEmailSchema,
   updateProfileSchema,
 } from './profiles.schema.js';
 
@@ -80,6 +83,30 @@ profilesRouter.get(
   '/me/offer-help/suggest',
   auth,
   asyncHandler(async (req, res) => ok(res, await service.suggestOfferHelp(req.auth!.sub))),
+);
+
+profilesRouter.patch(
+  '/me/email',
+  auth,
+  validate({ body: updateEmailSchema }),
+  asyncHandler(async (req, res) => ok(res, await service.updateEmail(req.auth!.sub, req.body.email))),
+);
+
+// Work Gallery (photos + videos).
+profilesRouter.post(
+  '/me/media',
+  auth,
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest('file is required');
+    const mediaType = req.body.mediaType === 'video' ? 'video' : 'photo';
+    ok(res, await service.addMedia(req.auth!.sub, mediaType, fileUrl(req.file.filename)), 201);
+  }),
+);
+profilesRouter.delete(
+  '/me/media/:id',
+  auth,
+  asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'profileMedia', Number(req.params.id)))),
 );
 
 // Education
@@ -162,6 +189,23 @@ profilesRouter.put('/me/delivery', auth, validate({ body: deliverySchema }), asy
 profilesRouter.put('/me/payment-terms', auth, validate({ body: paymentTermsSchema }), asyncHandler(async (req, res) => ok(res, await service.setPaymentTerms(req.auth!.sub, req.body))));
 profilesRouter.post('/me/payment-methods', auth, validate({ body: paymentMethodSchema }), asyncHandler(async (req, res) => ok(res, await service.addPaymentMethod(req.auth!.sub, req.body), 201)));
 profilesRouter.delete('/me/payment-methods/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'spPaymentMethod', Number(req.params.id)))));
+
+// Privacy settings (SP)
+profilesRouter.get('/me/privacy', auth, asyncHandler(async (req, res) => ok(res, await service.getMyPrivacy(req.auth!.sub))));
+profilesRouter.put('/me/privacy', auth, validate({ body: privacySchema }), asyncHandler(async (req, res) => ok(res, await service.setMyPrivacy(req.auth!.sub, req.body))));
+
+profilesRouter.post(
+  '/:id/share',
+  auth,
+  asyncHandler(async (req, res) => ok(res, await service.shareProfile(req.auth!.sub, Number(req.params.id), req.body?.channel), 201)),
+);
+
+profilesRouter.post(
+  '/:id/report',
+  auth,
+  validate({ body: reportProfileSchema }),
+  asyncHandler(async (req, res) => ok(res, await service.reportProfile(req.auth!.sub, Number(req.params.id), req.body), 201)),
+);
 
 // Public profile view (any member). Declared last so it never shadows /me/*.
 profilesRouter.get('/:id', auth, asyncHandler(async (req, res) => ok(res, await service.getPublicProfile(Number(req.params.id)))));

@@ -6,6 +6,7 @@ import { mockCharge } from '../../lib/payments.js';
 import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
 import { isSlotOpen, timeToDate, dateOnly } from '../../lib/slots.js';
 import { PLATFORM_FEE } from '../../lib/providerKind.js';
+import { getCustomFieldsForProfile } from '../../lib/customFields.js';
 
 const orderInclude = {
   buyer: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
@@ -28,18 +29,50 @@ export interface OrderFees {
   freeDeliveryRemaining: number;
 }
 
+/** A menu-type SP's Delivery settings, resolved from their admin-configured custom fields
+ *  (category 'delivery') rather than fixed columns — see [resolveDeliverySettings]. */
+interface DeliverySettings {
+  deliveryCharge: number;
+  freeDeliveryThreshold: number | null;
+  packagingCharge: number;
+  asPerActuals: boolean;
+}
+
+/**
+ * Resolves Delivery settings from the SP's admin-configured 'delivery'-category custom
+ * fields, matched by field name (case-insensitive) — the same best-effort-by-name pattern
+ * already used for payment-category fields elsewhere (see `createDirectPayment`). A field
+ * that's unanswered or missing (e.g. a conditional field hidden behind "Shipping Charges: No")
+ * simply defaults to 0/null/false, which is exactly the "not applicable" behavior wanted.
+ */
+async function resolveDeliverySettings(spProfileId: number): Promise<DeliverySettings> {
+  const fields = await getCustomFieldsForProfile(spProfileId);
+  const byName = (name: string) =>
+    fields.find((f) => f.category === 'delivery' && f.fieldName.trim().toLowerCase() === name.toLowerCase())?.value;
+  const num = (v: string | undefined) => {
+    const n = Number(v);
+    return v != null && v.trim() !== '' && Number.isFinite(n) ? n : null;
+  };
+  return {
+    deliveryCharge: num(byName('Below Threshold')) ?? 0,
+    freeDeliveryThreshold: num(byName('Free Delivery Threshold')),
+    packagingCharge: num(byName('Packaging charges')) ?? 0,
+    asPerActuals: byName('As Per Actuals') === 'true',
+  };
+}
+
 /** Fee breakdown for a PRODUCT order (delivery/packaging/platform + coupon). */
 async function computeProductFees(
-  delivery: { deliveryCharge: unknown; packagingCharge: unknown; freeDeliveryThreshold: unknown } | null,
+  delivery: DeliverySettings,
   subtotal: number,
   deliveryType: 'home_delivery' | 'pickup',
   couponCode?: string,
 ): Promise<OrderFees> {
-  const threshold = delivery?.freeDeliveryThreshold != null ? Number(delivery.freeDeliveryThreshold) : null;
+  const threshold = delivery.freeDeliveryThreshold;
   const meetsThreshold = threshold != null && subtotal >= threshold;
   const deliveryCharge =
-    deliveryType === 'home_delivery' && !meetsThreshold ? Number(delivery?.deliveryCharge ?? 0) : 0;
-  const packagingCharge = Number(delivery?.packagingCharge ?? 0);
+    deliveryType === 'home_delivery' && !meetsThreshold && !delivery.asPerActuals ? delivery.deliveryCharge : 0;
+  const packagingCharge = delivery.packagingCharge;
   const platformFee = subtotal > 0 ? PLATFORM_FEE : 0;
   const coupon = await resolveCoupon(couponCode, subtotal);
   const discount = coupon?.discount ?? 0;
@@ -90,7 +123,7 @@ export interface QuoteInput {
 }
 
 export async function quoteOrder(data: QuoteInput): Promise<OrderFees> {
-  const sp = await prisma.profile.findUnique({ where: { id: data.spProfileId }, select: { id: true, delivery: true } });
+  const sp = await prisma.profile.findUnique({ where: { id: data.spProfileId }, select: { id: true } });
   if (!sp) throw ApiError.notFound('Service provider not found');
 
   if (data.orderKind === 'booking') {
@@ -112,7 +145,8 @@ export async function quoteOrder(data: QuoteInput): Promise<OrderFees> {
 
   const rows = await buildItemRows(data.spProfileId, (data.items ?? []).map((i) => ({ ...i })));
   const subtotal = rows.reduce((s, r) => s + r.totalPrice, 0);
-  return computeProductFees(sp.delivery, subtotal, data.deliveryType ?? 'pickup', data.couponCode);
+  const delivery = await resolveDeliverySettings(data.spProfileId);
+  return computeProductFees(delivery, subtotal, data.deliveryType ?? 'pickup', data.couponCode);
 }
 
 // ── Product order ────────────────────────────────────────────
@@ -123,6 +157,7 @@ export interface PlaceOrderInput {
   deliveryAddressId?: number;
   couponCode?: string;
   specialInstructions?: string;
+  deliveryTimeWindow?: string;
   scheduledSlot?: { date: string; startTime: string; endTime: string };
 }
 
@@ -131,7 +166,7 @@ export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
 
   const sp = await prisma.profile.findUnique({
     where: { id: data.spProfileId },
-    select: { id: true, userId: true, name: true, delivery: true },
+    select: { id: true, userId: true, name: true },
   });
   if (!sp) throw ApiError.notFound('Service provider not found');
   if (sp.userId === buyerId) throw ApiError.badRequest('You cannot order from yourself');
@@ -139,7 +174,8 @@ export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
   const itemRows = await buildItemRows(data.spProfileId, data.items);
   const subtotal = itemRows.reduce((s, r) => s + r.totalPrice, 0);
   const deliveryType = data.deliveryType ?? 'pickup';
-  const fees = await computeProductFees(sp.delivery, subtotal, deliveryType, data.couponCode);
+  const delivery = await resolveDeliverySettings(data.spProfileId);
+  const fees = await computeProductFees(delivery, subtotal, deliveryType, data.couponCode);
 
   // Each slot is single-booking (capacity 1) — reject if it was taken in the meantime.
   const slot = data.scheduledSlot;
@@ -165,6 +201,7 @@ export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
           totalAmount: fees.total,
           couponId: fees.couponId,
           specialInstructions: data.specialInstructions,
+          deliveryTimeWindow: data.deliveryTimeWindow,
           items: { create: itemRows },
         },
         select: { id: true },
@@ -254,6 +291,43 @@ export async function placeBooking(buyerId: number, data: PlaceBookingInput) {
     entityId: orderId,
   });
   return prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
+}
+
+/**
+ * Instant "pay this provider" for non-menu (service) SPs — no request/accept step, unlike
+ * `placeBooking`. Used from the SP profile's "Make Payment" action. Menu/product SPs never
+ * call this: their payment always goes through a real placed order instead.
+ *
+ * The amount is entered by the resident (services are priced by direct negotiation with the
+ * SP — the "Payment & Fee" rate shown on the profile is a reference, not a fixed charge), so
+ * it's taken as-is from the caller rather than resolved from `SpRate`/custom fields.
+ */
+export async function createDirectPayment(buyerId: number, spProfileId: number, amount: number) {
+  const sp = await prisma.profile.findUnique({ where: { id: spProfileId }, select: { id: true, userId: true } });
+  if (!sp) throw ApiError.notFound('Service provider not found');
+  if (sp.userId === buyerId) throw ApiError.badRequest('You cannot pay yourself');
+
+  // Cosmetic context on the order only — best-effort, never blocks creation.
+  const fields = (await getCustomFieldsForProfile(spProfileId, { onlyAnswered: true })).filter(
+    (f) => f.category === 'payment',
+  );
+  const typeValue = fields.find((f) => /payment type/i.test(f.fieldName))?.value?.toLowerCase() ?? '';
+  const rateType = typeValue.includes('month') ? 'monthly' : typeValue.includes('session') ? 'per_session' : null;
+
+  const order = await prisma.order.create({
+    data: {
+      buyerId,
+      spProfileId,
+      orderKind: 'booking',
+      status: 'accepted',
+      subtotal: amount,
+      totalAmount: amount,
+      rateType,
+      rateAmount: amount,
+      acceptedAt: new Date(),
+    },
+  });
+  return prisma.order.findUnique({ where: { id: order.id }, include: orderInclude });
 }
 
 /** Materialize + lock a slot for an order (used by both product and booking placement). */

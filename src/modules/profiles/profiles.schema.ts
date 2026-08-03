@@ -141,3 +141,15 @@ export const paymentMethodSchema = z.object({
   accountNumber: z.string().optional(),
   ifscCode: z.string().optional(),
 });
+
+export const privacySchema = z.object({
+  showCallButton: z.boolean(),
+});
+
+export const updateEmailSchema = z.object({
+  email: z.string().email(),
+});
+
+export const reportProfileSchema = z.object({
+  reason: z.string().min(1).max(500),
+});

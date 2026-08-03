@@ -100,14 +100,21 @@ model ServiceSubcategoryField {
   id            Int     @id @default(autoincrement())
   subcategoryId Int     @map("subcategory_id")
   fieldName     String  @map("field_name")
-  fieldType     String  @map("field_type") // text | number | date | dropdown | boolean
+  fieldType     String  @map("field_type") // text | number | date | dropdown | boolean | file | menu | pincode
   fieldOptions  String? @map("field_options") // JSON array of options if field_type = dropdown
+  category      String  @default("basic_details") // basic_details | travel | payment | service_type | delivery
   isRequired    Boolean @default(false) @map("is_required")
   sortOrder     Int     @default(0) @map("sort_order")
   isActive      Boolean @default(true) @map("is_active")
+  // Conditional visibility: only shown to the SP when the field `dependsOnFieldId` currently
+  // holds the value `dependsOnValue`. Null (the default) means always shown.
+  dependsOnFieldId Int?    @map("depends_on_field_id")
+  dependsOnValue   String? @map("depends_on_value")
 
-  subcategory  ServiceSubcategory     @relation(fields: [subcategoryId], references: [id])
-  customValues SpProfileCustomField[]
+  subcategory    ServiceSubcategory        @relation(fields: [subcategoryId], references: [id])
+  customValues   SpProfileCustomField[]
+  dependsOnField ServiceSubcategoryField?  @relation("FieldDependency", fields: [dependsOnFieldId], references: [id], onDelete: SetNull)
+  dependents     ServiceSubcategoryField[] @relation("FieldDependency")
 
   @@map("service_subcategory_fields")
 }
@@ -409,6 +416,7 @@ model BlockedUser {
   blocker User @relation("UserBlocker", fields: [blockerId], references: [id])
   blocked User @relation("UserBlocked", fields: [blockedId], references: [id])
 
+  @@unique([blockerId, blockedId])
   @@map("blocked_users")
 }
 
@@ -645,8 +653,9 @@ model ProfileCompletionTracking {
 /// Per-field visibility settings. Each *_circle_id references visibility_circles.id;
 /// kept as scalar columns (enforced in app logic) to avoid 11 bidirectional relations.
 model ProfilePrivacySetting {
-  id                           Int  @id @default(autoincrement())
-  profileId                    Int  @unique @map("profile_id")
+  id                           Int     @id @default(autoincrement())
+  profileId                    Int     @unique @map("profile_id")
+  showCallButton               Boolean @default(false) @map("show_call_button")
   profileVisibilityCircleId    Int? @map("profile_visibility_circle_id")
   searchVisibilityCircleId     Int? @map("search_visibility_circle_id")
   nameVisibilityCircleId       Int? @map("name_visibility_circle_id")
@@ -1574,6 +1583,10 @@ model Order {
   rateAmount          Decimal?  @map("rate_amount") @db.Decimal(10, 2)
   couponId            Int?      @map("coupon_id")
   specialInstructions String?   @map("special_instructions")
+  // Product orders: the fixed delivery window the resident chose (e.g. "Tomorrow, 10:00 AM
+  // – 12:00 PM"), computed client-side from the SP's "Order placement timing" delivery
+  // setting — not tied to SpAvailability/scheduledSlot, which is service-booking infra.
+  deliveryTimeWindow  String?   @map("delivery_time_window")
   placedAt            DateTime  @default(now()) @map("placed_at")
   acceptedAt          DateTime? @map("accepted_at")
   rejectedAt          DateTime? @map("rejected_at")

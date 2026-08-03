@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { hashPassword } from '../src/utils/password.js';
 import { serviceCategories } from './data/service-categories.js';
+import { tutorStandardFields } from './data/tutor-fields.js';
 import {
   complexes,
   localityPincodes,
@@ -74,6 +75,25 @@ async function main() {
     }
   }
   console.log(`   ✓ ${serviceCategories.length} service categories`);
+
+  // ── Tutor standard onboarding fields (matches Figma Basic Details/Travel/Payment) ──
+  // Delete-then-recreate keeps this idempotent and clears out any stale/ad-hoc fields.
+  const tutorSubId = subcatByName.get('tutor');
+  if (tutorSubId) {
+    const staleFields = await prisma.serviceSubcategoryField.findMany({
+      where: { subcategoryId: tutorSubId },
+      select: { id: true },
+    });
+    const staleIds = staleFields.map((f) => f.id);
+    if (staleIds.length) {
+      await prisma.spProfileCustomField.deleteMany({ where: { fieldId: { in: staleIds } } });
+      await prisma.serviceSubcategoryField.deleteMany({ where: { id: { in: staleIds } } });
+    }
+    await prisma.serviceSubcategoryField.createMany({
+      data: tutorStandardFields.map((f) => ({ ...f, subcategoryId: tutorSubId })),
+    });
+    console.log(`   ✓ ${tutorStandardFields.length} standard Tutor onboarding fields`);
+  }
 
   // ── Address directory (Thane / Ghodbunder Road) ────────────
   // Areas keyed by locality (Lane 2); complexes seeded as addresses.

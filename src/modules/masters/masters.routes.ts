@@ -154,6 +154,7 @@ mastersRouter.post(
           fieldName: f.fieldName,
           fieldType: f.fieldType,
           fieldOptions: f.fieldOptions,
+          category: f.category,
           isRequired: f.isRequired,
           sortOrder: f.sortOrder,
           isActive: f.isActive,

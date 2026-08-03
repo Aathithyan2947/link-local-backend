@@ -7,7 +7,11 @@ import { ok, paginated } from '../../utils/http.js';
 import { paginationSchema } from '../../utils/pagination.js';
 import * as service from './discovery.service.js';
 
-const listQuery = paginationSchema.extend({ q: z.string().optional() });
+const listQuery = paginationSchema.extend({
+  q: z.string().optional(),
+  scope: z.enum(['society', 'lane', 'area', 'city']).optional(),
+  areaId: z.coerce.number().int().optional(),
+});
 const spListQuery = listQuery.extend({ subcategoryId: z.coerce.number().int().optional() });
 const ratingSchema = z.object({
   rating: z.coerce.number().int().min(1).max(5),
@@ -222,7 +226,7 @@ serviceProvidersRouter.get(
   '/:id',
   authenticate('user'),
   asyncHandler(async (req, res) =>
-    ok(res, await service.getServiceProvider(Number(req.params.id))),
+    ok(res, await service.getServiceProvider(Number(req.params.id), req.auth!.sub)),
   ),
 );
 const slotsQuery = z.object({

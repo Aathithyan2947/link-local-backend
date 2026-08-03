@@ -1,13 +1,19 @@
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
-import { resolveUserCityId } from '../home/home.service.js';
+import {
+  resolveUserScopeContext,
+  sanitizeAreaOverride,
+  addressScopeFilter,
+  type HomeScope,
+} from '../home/home.service.js';
 import { bumpUserStats } from '../../lib/stats.js';
 import { emitNotification } from '../../lib/notify.js';
 import { mockCharge } from '../../lib/payments.js';
 import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
 import { computeOpenSlots } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
+import { getCustomFieldsForProfile } from '../../lib/customFields.js';
 
 /** Open, bookable slots for an SP (for the resident's schedule view + checkout). */
 export async function getServiceProviderSlots(id: number, from?: string, days?: number) {
@@ -49,9 +55,6 @@ export interface CreateEventInput {
   rawMaterials?: string[];
 }
 
-const byCreatorCity = (cityId: number | null) =>
-  cityId ? { creator: { profile: { address: { area: { cityId } } } } } : {};
-
 /** Rounds an average to one decimal, or null when there are no ratings. */
 const round1 = (avg: number | null | undefined) =>
   avg == null ? null : Math.round(avg * 10) / 10;
@@ -81,9 +84,18 @@ async function spRatingMap(profileIds: number[]) {
 }
 
 // ── Events / Workshops ───────────────────────────────────────
-export async function listEvents(userId: number, params: PaginationParams & { q?: string }) {
-  const cityId = await resolveUserCityId(userId);
-  const where: Record<string, unknown> = { isActive: true, ...byCreatorCity(cityId) };
+export async function listEvents(
+  userId: number,
+  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number },
+) {
+  const ctx = await resolveUserScopeContext(userId);
+  const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
+  const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
+  const hasFilter = Object.keys(addressFilter).length > 0;
+  const where: Record<string, unknown> = {
+    isActive: true,
+    ...(hasFilter ? { creator: { profile: { address: addressFilter } } } : {}),
+  };
   if (params.q) where.title = { contains: params.q, mode: 'insensitive' };
 
   const [items, total] = await Promise.all([
@@ -345,9 +357,18 @@ export async function myEvents(userId: number) {
 }
 
 // ── Interest Groups ──────────────────────────────────────────
-export async function listGroups(userId: number, params: PaginationParams & { q?: string }) {
-  const cityId = await resolveUserCityId(userId);
-  const where: Record<string, unknown> = { isActive: true, ...byCreatorCity(cityId) };
+export async function listGroups(
+  userId: number,
+  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number },
+) {
+  const ctx = await resolveUserScopeContext(userId);
+  const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
+  const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
+  const hasFilter = Object.keys(addressFilter).length > 0;
+  const where: Record<string, unknown> = {
+    isActive: true,
+    ...(hasFilter ? { creator: { profile: { address: addressFilter } } } : {}),
+  };
   if (params.q) where.title = { contains: params.q, mode: 'insensitive' };
 
   const [items, total] = await Promise.all([
@@ -622,13 +643,16 @@ export async function myGroups(userId: number) {
 // ── Service Providers ────────────────────────────────────────
 export async function listServiceProviders(
   userId: number,
-  params: PaginationParams & { q?: string; subcategoryId?: number },
+  params: PaginationParams & { q?: string; subcategoryId?: number; scope?: HomeScope; areaId?: number },
 ) {
-  const cityId = await resolveUserCityId(userId);
+  const ctx = await resolveUserScopeContext(userId);
+  const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
+  const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
+  const hasFilter = Object.keys(addressFilter).length > 0;
   const where: Record<string, unknown> = {
     user: { userType: 'service_provider', isActive: true },
   };
-  if (cityId) where.address = { area: { cityId } };
+  if (hasFilter) where.address = addressFilter;
   if (params.q) where.name = { contains: params.q, mode: 'insensitive' };
   if (params.subcategoryId)
     where.serviceTypes = { some: { subcategoryId: params.subcategoryId } };
@@ -654,11 +678,11 @@ export async function listServiceProviders(
   return { items: enriched, meta: buildMeta(params.page, params.pageSize, total) };
 }
 
-export async function getServiceProvider(id: number) {
+export async function getServiceProvider(id: number, callerId?: number) {
   const sp = await prisma.profile.findUnique({
     where: { id },
     include: {
-      user: { select: { id: true, userType: true, mobile: true } },
+      user: { select: { id: true, userType: true, mobile: true, email: true } },
       address: { include: { area: { include: { city: true } } } },
       educations: true,
       professions: { include: { professionMaster: true } },
@@ -695,7 +719,7 @@ export async function getServiceProvider(id: number) {
     _count: { select: { attendees: true } },
   };
 
-  const [ragg, hosted, attending, posts, adminGroups, memberGroups] = await Promise.all([
+  const [ragg, hosted, attending, posts, adminGroups, memberGroups, customFields, privacy] = await Promise.all([
     prisma.serviceProviderRating.aggregate({
       where: { profileId: id },
       _avg: { rating: true },
@@ -731,6 +755,8 @@ export async function getServiceProvider(id: number) {
       where: { userId, status: 'joined' },
       include: { group: { include: { _count: { select: { members: true } } } } },
     }),
+    getCustomFieldsForProfile(id, { onlyAnswered: true }),
+    prisma.profilePrivacySetting.findUnique({ where: { profileId: id }, select: { showCallButton: true } }),
   ]);
 
   // Tag + dedupe events (hosting wins over attending) and attach rating averages.
@@ -752,11 +778,27 @@ export async function getServiceProvider(id: number) {
   ];
 
   const { hasMenu, hasDateBooking } = await resolveProviderFeatures(id);
+  const showCallButton = privacy?.showCallButton ?? false;
+  const isOwner = callerId != null && callerId === sp.userId;
+  const mobileVisible = isOwner || showCallButton;
+
+  let isBlocked = false;
+  if (callerId != null && !isOwner) {
+    const block = await prisma.blockedUser.findUnique({
+      where: { blockerId_blockedId: { blockerId: callerId, blockedId: sp.userId } },
+    });
+    isBlocked = !!block;
+  }
+
   return {
     ...sp,
+    user: { ...sp.user, mobile: mobileVisible ? sp.user.mobile : null, email: isOwner ? sp.user.email : null },
     providerKind: await resolveProviderKind(id),
     hasMenu,
     hasDateBooking,
+    showCallButton,
+    isBlocked,
+    customFields,
     ratingAvg: round1(ragg._avg.rating),
     ratingCount: ragg._count.rating,
     events,

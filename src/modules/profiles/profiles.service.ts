@@ -2,6 +2,7 @@ import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { dateOnly } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
+import { getCustomFieldsForProfile } from '../../lib/customFields.js';
 import type { z } from 'zod';
 import type {
   availabilitySchema,
@@ -16,6 +17,7 @@ import type {
   paymentTermsSchema,
   productSchema,
   professionSchema,
+  reportProfileSchema,
   serviceTypesSchema,
   updateProfileSchema,
 } from './profiles.schema.js';
@@ -155,6 +157,45 @@ export async function setPhoto(userId: number, photoUrl: string) {
   return updated;
 }
 
+export async function updateEmail(userId: number, email: string) {
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing && existing.id !== userId) throw ApiError.badRequest('That email is already in use.');
+  return prisma.user.update({ where: { id: userId }, data: { email }, select: { id: true, email: true } });
+}
+
+// ── Work Gallery (photos + videos) ────────────────────────────
+export async function addMedia(userId: number, mediaType: 'photo' | 'video', url: string) {
+  const profile = await requireProfile(userId);
+  const count = await prisma.profileMedia.count({ where: { profileId: profile.id } });
+  return prisma.profileMedia.create({ data: { profileId: profile.id, mediaType, url, sortOrder: count } });
+}
+
+/** Records a profile share in the unified entity_shares log. */
+export async function shareProfile(userId: number, profileId: number, channel?: string) {
+  const profile = await prisma.profile.findUnique({ where: { id: profileId }, select: { id: true } });
+  if (!profile) throw ApiError.notFound('Profile not found');
+  await prisma.entityShare.create({
+    data: { userId, entityType: 'profile', entityId: profileId, sharingChannel: channel ?? 'in_app' },
+  });
+  return { shared: true };
+}
+
+// ── Abuse reports ──────────────────────────────────────────────
+export async function reportProfile(reporterId: number, profileId: number, input: z.infer<typeof reportProfileSchema>) {
+  const profile = await prisma.profile.findUnique({ where: { id: profileId }, select: { userId: true } });
+  if (!profile) throw ApiError.notFound('Profile not found');
+  return prisma.abuseReport.create({
+    data: {
+      reportedBy: reporterId,
+      entityType: 'user',
+      entityId: profile.userId,
+      reportedUserId: profile.userId,
+      reason: input.reason,
+      status: 'pending',
+    },
+  });
+}
+
 // Degree, School and College are independent curated catalogs. Reuse a matching entry
 // (case-insensitive), else queue a brand-new "Other" suggestion as pending (isActive=false)
 // so it stays out of the app's pickers until an admin approves it.
@@ -283,7 +324,7 @@ export async function addContact(userId: number, input: z.infer<typeof contactSc
 /** Deletes a child row that belongs to the user's profile. */
 export async function deleteChild(
   userId: number,
-  model: 'profileEducation' | 'profileProfession' | 'profileHobby' | 'profileFamily' | 'profilePet' | 'profileContactDetail' | 'spProduct' | 'spPaymentMethod',
+  model: 'profileEducation' | 'profileProfession' | 'profileHobby' | 'profileFamily' | 'profilePet' | 'profileContactDetail' | 'spProduct' | 'spPaymentMethod' | 'profileMedia',
   id: number,
 ) {
   const profile = await requireProfile(userId);
@@ -371,36 +412,8 @@ export async function setServiceTypes(userId: number, input: z.infer<typeof serv
 // ── SP dynamic subcategory fields (menu/rate cards etc.) ─────
 /** The dynamic fields for the SP's selected subcategories, merged with their saved values. */
 export async function getMyCustomFields(userId: number) {
-  const profile = await prisma.profile.findUnique({
-    where: { userId },
-    include: { serviceTypes: { select: { subcategoryId: true } } },
-  });
-  if (!profile) throw ApiError.notFound('Profile not found');
-
-  const subcategoryIds = Array.from(new Set(profile.serviceTypes.map((s) => s.subcategoryId)));
-  if (subcategoryIds.length === 0) return [];
-
-  const fields = await prisma.serviceSubcategoryField.findMany({
-    where: { subcategoryId: { in: subcategoryIds }, isActive: true },
-    orderBy: [{ subcategoryId: 'asc' }, { sortOrder: 'asc' }],
-    include: { subcategory: { select: { name: true } } },
-  });
-  const values = await prisma.spProfileCustomField.findMany({
-    where: { profileId: profile.id, fieldId: { in: fields.map((f) => f.id) } },
-  });
-  const valueByField = new Map(values.map((v) => [v.fieldId, v.fieldValue]));
-
-  return fields.map((f) => ({
-    fieldId: f.id,
-    subcategoryId: f.subcategoryId,
-    subcategoryName: f.subcategory.name,
-    fieldName: f.fieldName,
-    fieldType: f.fieldType,
-    fieldOptions: f.fieldOptions,
-    isRequired: f.isRequired,
-    sortOrder: f.sortOrder,
-    value: valueByField.get(f.id) ?? '',
-  }));
+  const profile = await requireProfile(userId);
+  return getCustomFieldsForProfile(profile.id);
 }
 
 /** Replaces the SP's answers for the fields of their selected subcategories. */
@@ -536,6 +549,23 @@ export async function addPaymentMethod(userId: number, input: z.infer<typeof pay
   const row = await prisma.spPaymentMethod.create({ data: { profileId: profile.id, ...input } });
   await recomputeCompletion(profile.id);
   return row;
+}
+
+// ── Privacy settings ──────────────────────────────────────────
+export async function getMyPrivacy(userId: number) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.profilePrivacySetting.findUnique({ where: { profileId: profile.id } });
+  return { showCallButton: row?.showCallButton ?? false };
+}
+
+export async function setMyPrivacy(userId: number, input: { showCallButton: boolean }) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.profilePrivacySetting.upsert({
+    where: { profileId: profile.id },
+    update: { showCallButton: input.showCallButton },
+    create: { profileId: profile.id, showCallButton: input.showCallButton },
+  });
+  return { showCallButton: row.showCallButton };
 }
 
 // ── Completion tracking ──────────────────────────────────────

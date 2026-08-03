@@ -20,7 +20,7 @@ const storage = multer.diskStorage({
   },
 });
 
-const ALLOWED = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+const ALLOWED = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'video/mp4', 'video/quicktime'];
 
 export const upload = multer({
   storage,

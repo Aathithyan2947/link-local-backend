@@ -32,13 +32,21 @@ export const subcategoryFieldSchema = z.object({
   subcategoryId: z.number().int(),
   fieldName: z.string().min(1),
   // 'file' lets a subcategory require an upload such as a menu card / rate card.
+  // 'image' is the same upload flow but renders a picker + thumbnail preview (photos only).
   // 'menu' signals that this subcategory uses the product/menu feature in the app.
   // 'date' signals that this subcategory uses date-based slot booking.
-  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file', 'menu']),
+  // 'pincode' lets the SP pick one or more serviceable areas from the Area master
+  // (searchable by area name or pincode); the app stores a JSON array of Area IDs.
+  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file', 'image', 'menu', 'pincode']),
   fieldOptions: z.string().optional(),
+  category: z.enum(['basic_details', 'travel', 'payment', 'service_type', 'delivery']),
   isRequired: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
   isActive: z.boolean().optional(),
+  // Conditional visibility: only shown to the SP when the field `dependsOnFieldId` currently
+  // holds the value `dependsOnValue`. Leave both unset for "always show" (the default).
+  dependsOnFieldId: z.number().int().nullable().optional(),
+  dependsOnValue: z.string().nullable().optional(),
 });
 
 export const educationSchema = z.object({
