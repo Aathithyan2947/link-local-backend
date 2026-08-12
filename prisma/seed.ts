@@ -77,22 +77,41 @@ async function main() {
   console.log(`   ✓ ${serviceCategories.length} service categories`);
 
   // ── Tutor standard onboarding fields (matches Figma Basic Details/Travel/Payment) ──
-  // Delete-then-recreate keeps this idempotent and clears out any stale/ad-hoc fields.
+  // Matched on fieldName so re-seeding updates rows in place: field ids stay stable and the
+  // SPs' saved answers (spProfileCustomField, keyed by fieldId) survive. Only fields that are
+  // genuinely gone from the seed are dropped, and only then are their answers deleted.
   const tutorSubId = subcatByName.get('tutor');
   if (tutorSubId) {
-    const staleFields = await prisma.serviceSubcategoryField.findMany({
+    const existing = await prisma.serviceSubcategoryField.findMany({
       where: { subcategoryId: tutorSubId },
-      select: { id: true },
+      select: { id: true, fieldName: true },
     });
-    const staleIds = staleFields.map((f) => f.id);
+    const idByName = new Map(existing.map((f) => [f.fieldName, f.id]));
+    const seededNames = new Set(tutorStandardFields.map((f) => f.fieldName));
+
+    const staleIds = existing.filter((f) => !seededNames.has(f.fieldName)).map((f) => f.id);
     if (staleIds.length) {
       await prisma.spProfileCustomField.deleteMany({ where: { fieldId: { in: staleIds } } });
       await prisma.serviceSubcategoryField.deleteMany({ where: { id: { in: staleIds } } });
     }
-    await prisma.serviceSubcategoryField.createMany({
-      data: tutorStandardFields.map((f) => ({ ...f, subcategoryId: tutorSubId })),
-    });
-    console.log(`   ✓ ${tutorStandardFields.length} standard Tutor onboarding fields`);
+
+    for (const f of tutorStandardFields) {
+      const id = idByName.get(f.fieldName);
+      if (id) {
+        await prisma.serviceSubcategoryField.update({
+          where: { id },
+          // fieldOptions is cleared when the seed no longer sets it, so a field that changed
+          // type away from dropdown doesn't keep orphaned options.
+          data: { ...f, fieldOptions: f.fieldOptions ?? null, isActive: true },
+        });
+      } else {
+        await prisma.serviceSubcategoryField.create({ data: { ...f, subcategoryId: tutorSubId } });
+      }
+    }
+    console.log(
+      `   ✓ ${tutorStandardFields.length} standard Tutor onboarding fields` +
+        (staleIds.length ? ` (${staleIds.length} stale removed)` : ''),
+    );
   }
 
   // ── Address directory (Thane / Ghodbunder Road) ────────────

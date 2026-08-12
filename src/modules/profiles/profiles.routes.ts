@@ -22,6 +22,7 @@ import {
   privacySchema,
   productSchema,
   professionSchema,
+  professionsSchema,
   ratesSchema,
   reportProfileSchema,
   serviceTypesSchema,
@@ -92,6 +93,13 @@ profilesRouter.patch(
   asyncHandler(async (req, res) => ok(res, await service.updateEmail(req.auth!.sub, req.body.email))),
 );
 
+// Marks the SP as having finished the onboarding chain (final step's Confirm).
+profilesRouter.post(
+  '/me/onboarding-complete',
+  auth,
+  asyncHandler(async (req, res) => ok(res, await service.markOnboardingComplete(req.auth!.sub))),
+);
+
 // Work Gallery (photos + videos).
 profilesRouter.post(
   '/me/media',
@@ -115,6 +123,8 @@ profilesRouter.delete('/me/education/:id', auth, asyncHandler(async (req, res) =
 
 // Profession
 profilesRouter.post('/me/professions', auth, validate({ body: professionSchema }), asyncHandler(async (req, res) => ok(res, await service.addProfession(req.auth!.sub, req.body), 201)));
+// Replace-all, for callers that own the whole set (the SP wizard) — see setProfessions.
+profilesRouter.put('/me/professions', auth, validate({ body: professionsSchema }), asyncHandler(async (req, res) => ok(res, await service.setProfessions(req.auth!.sub, req.body))));
 profilesRouter.delete('/me/professions/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'profileProfession', Number(req.params.id)))));
 
 // Hobbies
@@ -169,6 +179,8 @@ profilesRouter.post(
 
 // Products (SP)
 profilesRouter.get('/me/products', auth, asyncHandler(async (req, res) => ok(res, await service.listMyProducts(req.auth!.sub))));
+// Labels the SP already used elsewhere — suggestions for the add-product customization editor.
+profilesRouter.get('/me/product-customizations', auth, asyncHandler(async (req, res) => ok(res, await service.myCustomizationLabels(req.auth!.sub))));
 profilesRouter.post('/me/products', auth, validate({ body: productSchema }), asyncHandler(async (req, res) => ok(res, await service.addProduct(req.auth!.sub, req.body), 201)));
 profilesRouter.patch('/me/products/:id', auth, validate({ body: productSchema.partial() }), asyncHandler(async (req, res) => ok(res, await service.updateProduct(req.auth!.sub, Number(req.params.id), req.body))));
 profilesRouter.delete('/me/products/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'spProduct', Number(req.params.id)))));

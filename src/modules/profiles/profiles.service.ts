@@ -15,8 +15,10 @@ import type {
   hobbySchema,
   paymentMethodSchema,
   paymentTermsSchema,
+  productCustomizationSchema,
   productSchema,
   professionSchema,
+  professionsSchema,
   reportProfileSchema,
   serviceTypesSchema,
   updateProfileSchema,
@@ -42,7 +44,7 @@ export async function getMyProfile(userId: number) {
       pets: true,
       contactDetails: true,
       serviceTypes: { include: { subcategory: { include: { category: true } } } },
-      products: { orderBy: { sortOrder: 'asc' } },
+      products: { orderBy: { sortOrder: 'asc' }, include: withCustomizations },
       rates: { where: { isActive: true } },
       delivery: true,
       availability: true,
@@ -55,6 +57,20 @@ export async function getMyProfile(userId: number) {
   const providerKind = await resolveProviderKind(profile.id);
   const { hasMenu, hasDateBooking } = await resolveProviderFeatures(profile.id);
   return { ...profile, providerKind, hasMenu, hasDateBooking };
+}
+
+/**
+ * Records that the SP finished the onboarding chain — called when the final step's Confirm
+ * lands. Idempotent: re-running the chain later keeps the original completion time, so the
+ * one-time congratulations can't be re-triggered by editing a step.
+ */
+export async function markOnboardingComplete(userId: number) {
+  const profile = await requireProfile(userId);
+  if (profile.onboardingCompletedAt) return profile;
+  return prisma.profile.update({
+    where: { id: profile.id },
+    data: { onboardingCompletedAt: new Date() },
+  });
 }
 
 // ── Service SP rates (per session / monthly / hourly) ────────
@@ -258,27 +274,57 @@ export async function addEducation(userId: number, input: z.infer<typeof educati
 }
 
 // ── Profession (curated category + self-suggested "Other") ──────
-export async function addProfession(userId: number, input: z.infer<typeof professionSchema>) {
-  const profile = await requireProfile(userId);
-  let professionMasterId = input.professionMasterId;
-  if (!professionMasterId && input.category) {
+/** The master id for one profession input, creating a pending master for a new free-text category. */
+async function resolveProfessionMasterId(input: z.infer<typeof professionSchema>) {
+  if (input.professionMasterId) return input.professionMasterId;
+  if (input.category?.trim()) {
     const category = input.category.trim();
     // Reuse an existing category (case-insensitive, any status) to avoid duplicate pendings;
     // a brand-new "Other" category is queued as pending (isActive=false) for admin approval.
     const existing = await prisma.professionMaster.findFirst({
       where: { category: { equals: category, mode: 'insensitive' } },
     });
-    professionMasterId =
-      existing?.id ??
-      (await prisma.professionMaster.create({ data: { category, isActive: false } })).id;
+    return existing?.id ?? (await prisma.professionMaster.create({ data: { category, isActive: false } })).id;
   }
-  if (!professionMasterId) throw ApiError.badRequest('professionMasterId or category required');
+  throw ApiError.badRequest('professionMasterId or category required');
+}
+
+export async function addProfession(userId: number, input: z.infer<typeof professionSchema>) {
+  const profile = await requireProfile(userId);
+  const professionMasterId = await resolveProfessionMasterId(input);
   const row = await prisma.profileProfession.create({
     data: { profileId: profile.id, professionMasterId, companyOrDetail: input.companyOrDetail },
     include: { professionMaster: true },
   });
   await recomputeCompletion(profile.id);
   return row;
+}
+
+/**
+ * Replaces the profile's whole profession set (like [setRates]) — for callers that own every
+ * entry rather than appending one. The SP setup wizard uses this so re-saving a step can't
+ * pile up duplicate rows; the multi-add profile section keeps using addProfession/deleteChild.
+ */
+export async function setProfessions(userId: number, input: z.infer<typeof professionsSchema>) {
+  const profile = await requireProfile(userId);
+  // Resolve before opening the transaction — creating a pending master is its own write.
+  const rows = [];
+  for (const p of input.professions) {
+    rows.push({
+      profileId: profile.id,
+      professionMasterId: await resolveProfessionMasterId(p),
+      companyOrDetail: p.companyOrDetail,
+    });
+  }
+  await prisma.$transaction([
+    prisma.profileProfession.deleteMany({ where: { profileId: profile.id } }),
+    prisma.profileProfession.createMany({ data: rows }),
+  ]);
+  await recomputeCompletion(profile.id);
+  return prisma.profileProfession.findMany({
+    where: { profileId: profile.id },
+    include: { professionMaster: true },
+  });
 }
 
 // ── Hobbies (admin master + self-suggesting) ─────────────────
@@ -453,16 +499,53 @@ export async function saveCustomFields(userId: number, values: { fieldId: number
 }
 
 // ── SP products / delivery / payment ─────────────────────────
+/// Rows for a product's customization menu, in the order the SP arranged them.
+function customizationRows(list: z.infer<typeof productCustomizationSchema>[]) {
+  return list.map((c, i) => ({
+    label: c.label.trim(),
+    inputType: c.inputType,
+    isRequired: c.isRequired ?? false,
+    sortOrder: i,
+  }));
+}
+
+const withCustomizations = { customizations: { orderBy: { sortOrder: 'asc' } } } as const;
+
 export async function addProduct(userId: number, input: z.infer<typeof productSchema>) {
   const profile = await requireProfile(userId);
-  const row = await prisma.spProduct.create({ data: { profileId: profile.id, ...input } });
+  const { customizations, ...product } = input;
+  const row = await prisma.spProduct.create({
+    data: {
+      profileId: profile.id,
+      ...product,
+      ...(customizations?.length ? { customizations: { create: customizationRows(customizations) } } : {}),
+    },
+    include: withCustomizations,
+  });
   await recomputeCompletion(profile.id);
   return row;
 }
 
 export async function listMyProducts(userId: number) {
   const profile = await requireProfile(userId);
-  return prisma.spProduct.findMany({ where: { profileId: profile.id }, orderBy: { sortOrder: 'asc' } });
+  return prisma.spProduct.findMany({
+    where: { profileId: profile.id },
+    orderBy: { sortOrder: 'asc' },
+    include: withCustomizations,
+  });
+}
+
+/// Labels this SP has already used on their other products — offered as suggestions so a
+/// baker doesn't retype "Eggless" on all thirty cakes.
+export async function myCustomizationLabels(userId: number) {
+  const profile = await requireProfile(userId);
+  const rows = await prisma.spProductCustomization.findMany({
+    where: { product: { profileId: profile.id } },
+    select: { label: true, inputType: true },
+    distinct: ['label'],
+    orderBy: { label: 'asc' },
+  });
+  return rows;
 }
 
 export async function updateProduct(
@@ -473,7 +556,18 @@ export async function updateProduct(
   const profile = await requireProfile(userId);
   const row = await prisma.spProduct.findUnique({ where: { id } });
   if (!row || row.profileId !== profile.id) throw ApiError.notFound('Product not found');
-  return prisma.spProduct.update({ where: { id }, data: input });
+  const { customizations, ...product } = input;
+  // Replace-all only when the key is present — a PATCH that omits it leaves them alone.
+  return prisma.spProduct.update({
+    where: { id },
+    data: {
+      ...product,
+      ...(customizations
+        ? { customizations: { deleteMany: {}, create: customizationRows(customizations) } }
+        : {}),
+    },
+    include: withCustomizations,
+  });
 }
 
 export async function setDelivery(userId: number, input: z.infer<typeof deliverySchema>) {

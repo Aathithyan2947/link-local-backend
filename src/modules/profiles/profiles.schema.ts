@@ -10,6 +10,10 @@ export const updateProfileSchema = z.object({
   yearsOfExperience: z.number().int().min(0).max(80).optional(),
   socialMediaShareEnabled: z.boolean().optional(),
   canOfferHelpWith: z.string().max(1000).optional(),
+  // Public contact details — NOT the sign-in credentials. Empty string clears them; no
+  // uniqueness or verification, since the SP may legitimately publish their personal number.
+  servicePhone: z.string().max(20).optional(),
+  serviceEmail: z.string().max(120).optional(),
 });
 
 export const educationSchema = z.object({
@@ -28,6 +32,11 @@ export const professionSchema = z.object({
   professionMasterId: z.number().int().optional(),
   category: z.string().optional(), // self-add if no id
   companyOrDetail: z.string().optional(),
+});
+
+/** Replace-all form of [professionSchema], for callers that own the whole set (the SP wizard). */
+export const professionsSchema = z.object({
+  professions: z.array(professionSchema),
 });
 
 export const hobbySchema = z.object({
@@ -71,6 +80,14 @@ export const serviceTypesSchema = z.object({
     .optional(),
 });
 
+/// One customization the SP offers on a product. `toggle` is a yes/no option; `text` adds a
+/// free-text box for the resident to fill in (what the old "Custom message" checkbox did).
+export const productCustomizationSchema = z.object({
+  label: z.string().min(1).max(60),
+  inputType: z.enum(['toggle', 'text']).default('toggle'),
+  isRequired: z.boolean().optional(),
+});
+
 export const productSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
@@ -82,6 +99,9 @@ export const productSchema = z.object({
   photoUrl: z.string().optional(),
   category: z.string().optional(),
   isAvailable: z.boolean().optional(),
+  // Replace-all when present, like rates/professions. Capped so the resident's product
+  // screen stays usable. Omit the key to leave existing customizations untouched.
+  customizations: z.array(productCustomizationSchema).max(10).optional(),
 });
 
 export const deliverySchema = z.object({

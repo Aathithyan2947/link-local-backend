@@ -85,7 +85,10 @@ model ServiceSubcategory {
   id         Int     @id @default(autoincrement())
   categoryId Int     @map("category_id")
   name       String
-  type       String? @map("type") // menu | date | null  — controls which SP features are shown
+  /// DEPRECATED — no longer read. Menu/date is configured as a `service_type` onboarding
+  /// field (fieldType 'menu' | 'date') so every step is set up the same way; see
+  /// lib/providerKind.ts. Kept until the change has bedded in, then droppable.
+  type       String? @map("type")
   isActive   Boolean @default(true) @map("is_active")
 
   category     ServiceCategory           @relation(fields: [categoryId], references: [id])
@@ -594,6 +597,16 @@ model Profile {
   socialMediaShareEnabled Boolean   @default(false) @map("social_media_share_enabled")
   visibilityCircleId      Int?      @map("visibility_circle_id")
   yearsOfExperience       Int?      @map("years_of_experience")
+  /// When the SP pressed Confirm on the final onboarding step. Null means they never finished.
+  /// Recorded explicitly rather than inferred from answered fields, because the Products step
+  /// has no admin-configured fields and so is invisible to any such inference.
+  onboardingCompletedAt   DateTime? @map("onboarding_completed_at")
+  /// The contact details shown on the SP's public profile. Kept apart from User.mobile /
+  /// User.email, which are sign-in credentials: an SP may publish a business number while
+  /// signing in with a private one. Reusing the same value is fine — these are display
+  /// fields, so they are neither unique nor verified.
+  servicePhone            String?   @map("service_phone")
+  serviceEmail            String?   @map("service_email")
   marketingCouponId       Int?      @map("marketing_coupon_id")
   createdAt               DateTime  @default(now()) @map("created_at")
   updatedAt               DateTime  @updatedAt @map("updated_at")
@@ -819,10 +832,30 @@ model SpProduct {
   sortOrder          Int      @default(0) @map("sort_order")
   createdAt          DateTime @default(now()) @map("created_at")
 
-  profile    Profile     @relation(fields: [profileId], references: [id])
-  orderItems OrderItem[]
+  profile        Profile                  @relation(fields: [profileId], references: [id])
+  orderItems     OrderItem[]
+  customizations SpProductCustomization[]
 
   @@map("sp_products")
+}
+
+/// One customization the SP offers on a product — replaces the two hard-coded "Eggless" /
+/// "Custom message" checkboxes, which only ever suited a bakery. The resident's actual choice
+/// is rendered into `OrderItem.customizationNotes` at checkout; these rows are the menu of
+/// what may be chosen.
+model SpProductCustomization {
+  id         Int     @id @default(autoincrement())
+  productId  Int     @map("product_id")
+  label      String
+  /// toggle → a yes/no option; text → a toggle plus a free-text box the resident fills in.
+  inputType  String  @default("toggle") @map("input_type")
+  isRequired Boolean @default(false) @map("is_required")
+  sortOrder  Int     @default(0) @map("sort_order")
+
+  product SpProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@map("sp_product_customizations")
 }
 
 model SpDeliveryPreference {

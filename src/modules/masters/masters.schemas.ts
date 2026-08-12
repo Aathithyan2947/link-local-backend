@@ -33,11 +33,13 @@ export const subcategoryFieldSchema = z.object({
   fieldName: z.string().min(1),
   // 'file' lets a subcategory require an upload such as a menu card / rate card.
   // 'image' is the same upload flow but renders a picker + thumbnail preview (photos only).
-  // 'menu' signals that this subcategory uses the product/menu feature in the app.
-  // 'date' signals that this subcategory uses date-based slot booking.
+  // 'menu' and 'booking' are FEATURE MARKERS, not questions: they signal that the
+  // subcategory uses the product/menu feature or date-based slot booking, and render in the
+  // app as a link into that editor. Configure them under the 'service_type' category.
+  // 'date' is an ordinary date question (renders a picker) — it is NOT the booking marker.
   // 'pincode' lets the SP pick one or more serviceable areas from the Area master
   // (searchable by area name or pincode); the app stores a JSON array of Area IDs.
-  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file', 'image', 'menu', 'pincode']),
+  fieldType: z.enum(['text', 'number', 'date', 'dropdown', 'boolean', 'file', 'image', 'menu', 'booking', 'pincode']),
   fieldOptions: z.string().optional(),
   category: z.enum(['basic_details', 'travel', 'payment', 'service_type', 'delivery']),
   isRequired: z.boolean().optional(),
@@ -126,6 +128,12 @@ export const cityUpdate = partial(citySchema.shape);
 export const areaUpdate = partial(areaSchema.shape);
 export const serviceCategoryUpdate = partial(serviceCategorySchema.shape);
 export const serviceSubcategoryUpdate = partial(serviceSubcategorySchema.shape);
+/// Bulk re-sequencing from the admin's drag-and-drop ordering. One call rather than N
+/// PATCHes so a failure can't leave the list half-ordered.
+export const subcategoryFieldReorderSchema = z.object({
+  items: z.array(z.object({ id: z.number().int(), sortOrder: z.number().int().min(0) })).min(1),
+});
+
 export const subcategoryFieldUpdate = partial(subcategoryFieldSchema.shape);
 export const educationUpdate = partial(educationSchema.shape);
 export const professionUpdate = partial(professionSchema.shape);

@@ -118,7 +118,15 @@ mastersRouter.use(
     searchFields: ['name'],
     filterFields: ['categoryId'],
     defaultOrderBy: { name: 'asc' },
-    include: { category: { select: { id: true, name: true } } },
+    include: {
+      category: { select: { id: true, name: true } },
+      // Only the feature markers — lets the admin list show Menu/Date badges without a
+      // second request now that the deprecated `type` column is no longer read.
+      fields: {
+        where: { fieldType: { in: ['menu', 'booking'] }, isActive: true },
+        select: { fieldType: true },
+      },
+    },
     publicRead: true,
   }),
 );
@@ -162,6 +170,34 @@ mastersRouter.post(
       });
     }
     ok(res, { copied: toCreate.length, skipped: source.length - toCreate.length }, 201);
+  }),
+);
+
+// Re-sequences a sub-category's fields after a drag-and-drop reorder. Registered before the
+// CRUD mount so it isn't shadowed by it, same as /copy above.
+mastersRouter.patch(
+  '/subcategory-fields/reorder',
+  authenticate('admin'),
+  validate({ body: s.subcategoryFieldReorderSchema }),
+  asyncHandler(async (req, res) => {
+    const { items } = req.body as z.infer<typeof s.subcategoryFieldReorderSchema>;
+    const ids = items.map((i) => i.id);
+    const rows = await prisma.serviceSubcategoryField.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, subcategoryId: true },
+    });
+    if (rows.length !== ids.length) throw ApiError.badRequest('Unknown field in reorder');
+    // All-or-nothing, and only within one sub-category — a payload spanning two would
+    // silently renumber fields the admin wasn't looking at.
+    if (new Set(rows.map((r) => r.subcategoryId)).size > 1) {
+      throw ApiError.badRequest('Fields must belong to the same sub-category');
+    }
+    await prisma.$transaction(
+      items.map((i) =>
+        prisma.serviceSubcategoryField.update({ where: { id: i.id }, data: { sortOrder: i.sortOrder } }),
+      ),
+    );
+    ok(res, { reordered: items.length });
   }),
 );
 

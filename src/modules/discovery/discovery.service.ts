@@ -696,7 +696,11 @@ export async function getServiceProvider(id: number, callerId?: number) {
           },
         },
       },
-      products: { where: { isAvailable: true }, orderBy: { sortOrder: 'asc' } },
+      products: {
+        where: { isAvailable: true },
+        orderBy: { sortOrder: 'asc' },
+        include: { customizations: { orderBy: { sortOrder: 'asc' } } },
+      },
       rates: { where: { isActive: true }, orderBy: { id: 'asc' } },
       media: { orderBy: { sortOrder: 'asc' } },
       delivery: true,
@@ -790,9 +794,24 @@ export async function getServiceProvider(id: number, callerId?: number) {
     isBlocked = !!block;
   }
 
+  // The published number is the SP's service phone when they've set one, falling back to their
+  // sign-in number only if they haven't. Once a service phone exists the credential is never
+  // sent to anyone but the owner — publishing a business number must not expose the private
+  // one behind it. (An SP is free to make them the same value; that's their choice, not ours.)
+  const publishedPhone = sp.servicePhone?.trim() || sp.user.mobile;
+  const publishedEmail = sp.serviceEmail?.trim() || null;
+
   return {
     ...sp,
-    user: { ...sp.user, mobile: mobileVisible ? sp.user.mobile : null, email: isOwner ? sp.user.email : null },
+    servicePhone: isOwner ? sp.servicePhone : null,
+    serviceEmail: isOwner ? sp.serviceEmail : null,
+    publishedPhone: mobileVisible ? publishedPhone : null,
+    publishedEmail,
+    user: {
+      ...sp.user,
+      mobile: isOwner ? sp.user.mobile : null,
+      email: isOwner ? sp.user.email : null,
+    },
     providerKind: await resolveProviderKind(id),
     hasMenu,
     hasDateBooking,
