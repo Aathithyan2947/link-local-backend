@@ -27,3 +27,8 @@ usersRouter.get(
   auth,
   asyncHandler(async (req, res) => ok(res, await service.blockStatus(req.auth!.sub, Number(req.params.id)))),
 );
+usersRouter.get(
+  '/blocked',
+  auth,
+  asyncHandler(async (req, res) => ok(res, await service.listBlocked(req.auth!.sub))),
+);

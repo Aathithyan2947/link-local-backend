@@ -5,6 +5,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import { signAccessToken, signRefreshToken, type TokenPayload } from '../../utils/jwt.js';
 import { logger } from '../../lib/logger.js';
+import { creditReferralOnRegistration } from '../referrals/referrals.service.js';
 import type {
   AdminLoginInput,
   LoginInput,
@@ -73,6 +74,8 @@ export async function register(input: RegisterInput) {
     },
     select: userPublicSelect,
   });
+
+  if (referredBy) await creditReferralOnRegistration(referredBy, { id: user.id, mobile: user.mobile ?? null });
 
   const payload: TokenPayload = { sub: user.id, principal: 'user', userType: user.userType };
   return { user, ...issueTokens(payload) };
@@ -221,6 +224,7 @@ export async function verifyOtp(input: OtpVerifyInput) {
         stats: { create: {} },
       },
     });
+    if (referredBy) await creditReferralOnRegistration(referredBy, { id: user.id, mobile: user.mobile ?? null });
   }
 
   const payload: TokenPayload = { sub: user.id, principal: 'user', userType: user.userType };

@@ -250,3 +250,11 @@ serviceProvidersRouter.post(
     ok(res, await service.rateServiceProvider(Number(req.params.id), req.auth!.sub, req.body), 201),
   ),
 );
+
+// ── Reviews submitted by the current user ────────────────────
+export const reviewsRouter = Router();
+reviewsRouter.get(
+  '/mine',
+  authenticate('user'),
+  asyncHandler(async (req, res) => ok(res, await service.myReviews(req.auth!.sub))),
+);

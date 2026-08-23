@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
 import {
@@ -205,11 +206,11 @@ export async function createEvent(userId: number, data: CreateEventInput) {
 }
 
 export async function updateEvent(eventId: number, userId: number, data: Partial<CreateEventInput>) {
-  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { creatorId: true } });
+  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { creatorId: true, photoUrl: true } });
   if (!event) throw ApiError.notFound('Event not found');
   if (event.creatorId !== userId) throw ApiError.forbidden('Only the host can edit this event');
 
-  return prisma.event.update({
+  const updated = await prisma.event.update({
     where: { id: eventId },
     data: {
       title: data.title,
@@ -230,6 +231,10 @@ export async function updateEvent(eventId: number, userId: number, data: Partial
     },
     include: eventCardInclude,
   });
+  if (data.photoUrl !== undefined && data.photoUrl !== event.photoUrl && event.photoUrl) {
+    void destroyByUrl(event.photoUrl, 'image');
+  }
+  return updated;
 }
 
 export async function joinEvent(eventId: number, userId: number) {
@@ -353,7 +358,10 @@ export async function myEvents(userId: number) {
       include: eventCardInclude,
     }),
   ]);
-  return { hosted, attending };
+  const ratings = await eventRatingMap([...hosted, ...attending].map((e) => e.id));
+  const enrich = (items: typeof hosted) =>
+    items.map((e) => ({ ...e, ratingAvg: ratings.get(e.id)?.avg ?? null, ratingCount: ratings.get(e.id)?.count ?? 0 }));
+  return { hosted: enrich(hosted), attending: enrich(attending) };
 }
 
 // ── Interest Groups ──────────────────────────────────────────
@@ -388,7 +396,7 @@ export async function listGroups(
 
 const groupCardInclude = {
   creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
-  _count: { select: { members: true } },
+  _count: { select: { members: { where: { status: 'joined' } } } },
 };
 
 export interface CreateGroupInput {
@@ -482,10 +490,10 @@ export async function createGroup(userId: number, data: CreateGroupInput) {
 }
 
 export async function updateGroup(groupId: number, userId: number, data: Partial<CreateGroupInput>) {
-  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true } });
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true, photoUrl: true } });
   if (!group) throw ApiError.notFound('Group not found');
   if (group.creatorId !== userId) throw ApiError.forbidden('Only the creator can edit this group');
-  return prisma.interestGroup.update({
+  const updated = await prisma.interestGroup.update({
     where: { id: groupId },
     data: {
       title: data.title,
@@ -501,6 +509,10 @@ export async function updateGroup(groupId: number, userId: number, data: Partial
     },
     include: groupCardInclude,
   });
+  if (data.photoUrl !== undefined && data.photoUrl !== group.photoUrl && group.photoUrl) {
+    void destroyByUrl(group.photoUrl, 'image');
+  }
+  return updated;
 }
 
 export async function joinGroup(groupId: number, userId: number) {
@@ -630,14 +642,19 @@ export async function createGroupPost(
 }
 
 export async function myGroups(userId: number) {
-  return prisma.interestGroup.findMany({
-    where: {
-      isActive: true,
-      OR: [{ creatorId: userId }, { members: { some: { userId, status: 'joined' } } }],
-    },
-    orderBy: { createdAt: 'desc' },
-    include: groupCardInclude,
-  });
+  const [owned, joined] = await Promise.all([
+    prisma.interestGroup.findMany({
+      where: { creatorId: userId, isActive: true },
+      orderBy: { createdAt: 'desc' },
+      include: groupCardInclude,
+    }),
+    prisma.interestGroup.findMany({
+      where: { isActive: true, members: { some: { userId, status: 'joined' } } },
+      orderBy: { createdAt: 'desc' },
+      include: groupCardInclude,
+    }),
+  ]);
+  return { owned, joined };
 }
 
 // ── Service Providers ────────────────────────────────────────
@@ -851,4 +868,54 @@ export async function rateServiceProvider(
   return prisma.serviceProviderRating.create({
     data: { profileId, ratedBy: raterId, rating: data.rating, review: data.review ?? null },
   });
+}
+
+/** Every review the current user has submitted, across the three entities that support one. */
+export async function myReviews(userId: number) {
+  const [serviceProviders, events, groups] = await Promise.all([
+    prisma.serviceProviderRating.findMany({
+      where: { ratedBy: userId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        profile: {
+          select: {
+            id: true,
+            name: true,
+            photoUrl: true,
+            address: { select: { fullAddress: true } },
+            serviceTypes: { include: { subcategory: true }, take: 1 },
+          },
+        },
+      },
+    }),
+    prisma.eventRating.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        event: {
+          select: {
+            id: true,
+            title: true,
+            photoUrl: true,
+            creator: { select: { profile: { select: { name: true } } } },
+          },
+        },
+      },
+    }),
+    prisma.interestGroupRating.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        group: {
+          select: {
+            id: true,
+            title: true,
+            photoUrl: true,
+            creator: { select: { profile: { select: { name: true } } } },
+          },
+        },
+      },
+    }),
+  ]);
+  return { serviceProviders, events, groups };
 }

@@ -42,6 +42,7 @@ const statusSchema = z.object({
 const paySchema = z.object({
   paymentType: z.enum(['advance', 'partial', 'final']).optional(),
   paymentMethod: z.enum(['upi', 'card', 'net_banking', 'cash', 'bank_transfer']).optional(),
+  paymentSubMethod: z.string().trim().max(60).optional(),
 });
 
 const slotShape = z.object({

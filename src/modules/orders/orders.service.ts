@@ -14,6 +14,7 @@ const orderInclude = {
   items: { include: { product: { select: { id: true, name: true, photoUrl: true, quantityMetric: true } } } },
   payments: { orderBy: { createdAt: 'desc' as const } },
   scheduledSlot: true,
+  deliveryAddress: { select: { fullAddress: true } },
 };
 
 // ── Fees ─────────────────────────────────────────────────────
@@ -501,7 +502,7 @@ async function freeSlot(orderId: number) {
 export async function payOrder(
   orderId: number,
   buyerId: number,
-  opts: { paymentType?: string; paymentMethod?: string } = {},
+  opts: { paymentType?: string; paymentMethod?: string; paymentSubMethod?: string } = {},
 ) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -522,6 +523,7 @@ export async function payOrder(
       amount,
       paymentType: opts.paymentType ?? 'advance',
       paymentMethod: opts.paymentMethod ?? 'upi',
+      paymentSubMethod: opts.paymentSubMethod,
       paymentStatus: 'paid',
       transactionRef: charge.transactionRef,
       paidAt: charge.paidAt,

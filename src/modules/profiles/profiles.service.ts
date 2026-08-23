@@ -1,8 +1,10 @@
 import { prisma } from '../../lib/prisma.js';
+import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { dateOnly } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
 import { getCustomFieldsForProfile } from '../../lib/customFields.js';
+import { hashPassword, verifyPassword } from '../../utils/password.js';
 import type { z } from 'zod';
 import type {
   availabilitySchema,
@@ -16,12 +18,14 @@ import type {
   paymentMethodSchema,
   paymentTermsSchema,
   productCustomizationSchema,
+  notificationPrefsSchema,
   productSchema,
   professionSchema,
   professionsSchema,
   reportProfileSchema,
   serviceTypesSchema,
   updateProfileSchema,
+  visibilitySchema,
 } from './profiles.schema.js';
 
 /** Returns the profile row for a user, or throws 404. */
@@ -92,19 +96,69 @@ export async function setRates(userId: number, input: z.infer<typeof ratesSchema
   return prisma.spRate.findMany({ where: { profileId: profile.id, isActive: true }, orderBy: { id: 'asc' } });
 }
 
+type OwnerAddress = { areaId: number; apartment: string | null } | null;
+
+/** 'area' scope requires the same area; 'apartment' also requires the same free-text apartment name. */
+function addressMatches(scope: 'area' | 'apartment', viewer: OwnerAddress, owner: OwnerAddress): boolean {
+  if (!viewer || !owner || viewer.areaId !== owner.areaId) return false;
+  if (scope === 'area') return true;
+  const a = viewer.apartment?.trim().toLowerCase();
+  const b = owner.apartment?.trim().toLowerCase();
+  return !!a && !!b && a === b;
+}
+
 /** Public profile view (the "User" frame) — any member viewing another member. */
-export async function getPublicProfile(profileId: number) {
+export async function getPublicProfile(profileId: number, viewerUserId: number) {
   const profile = await prisma.profile.findUnique({
     where: { id: profileId },
     include: {
-      user: { select: { id: true, userType: true, mobile: true } },
+      user: { select: { id: true, userType: true, mobile: true, email: true } },
       address: { include: { area: { include: { city: true } } } },
       educations: { include: { educationMaster: true } },
       professions: { include: { professionMaster: true } },
+      privacy: { select: { profileVisibility: true, contactVisibility: true } },
     },
   });
   if (!profile) throw ApiError.notFound('Profile not found');
   const userId = profile.userId;
+  const isOwner = viewerUserId === userId;
+
+  if (!isOwner) {
+    const block = await prisma.blockedUser.findUnique({
+      where: { blockerId_blockedId: { blockerId: userId, blockedId: viewerUserId } },
+    });
+    if (block) throw ApiError.forbidden('This profile is not visible to you.');
+  }
+
+  const profileVisibility = profile.privacy?.profileVisibility ?? 'all';
+  const contactVisibility = profile.privacy?.contactVisibility ?? 'only_me';
+  const needsAddressCompare = ['area', 'apartment'].includes(profileVisibility) || ['area', 'apartment'].includes(contactVisibility);
+
+  let viewerAddress: OwnerAddress = null;
+  if (!isOwner && needsAddressCompare) {
+    const viewerProfile = await prisma.profile.findUnique({
+      where: { userId: viewerUserId },
+      select: { address: { select: { areaId: true, apartment: true } } },
+    });
+    viewerAddress = viewerProfile?.address ?? null;
+  }
+  const ownerAddress: OwnerAddress = profile.address ? { areaId: profile.address.areaId, apartment: profile.address.apartment } : null;
+
+  const profileVisible =
+    isOwner ||
+    profileVisibility === 'all' ||
+    (profileVisibility !== 'only_me' && addressMatches(profileVisibility as 'area' | 'apartment', viewerAddress, ownerAddress));
+  if (!profileVisible) throw ApiError.forbidden('This profile is not visible to you.');
+
+  let contactVisible =
+    isOwner ||
+    contactVisibility === 'all' ||
+    (['area', 'apartment'].includes(contactVisibility) &&
+      addressMatches(contactVisibility as 'area' | 'apartment', viewerAddress, ownerAddress));
+  if (!contactVisible && !isOwner && contactVisibility === 'has_ordered') {
+    const order = await prisma.order.findFirst({ where: { buyerId: viewerUserId, spProfile: { userId } } });
+    contactVisible = !!order;
+  }
 
   const eventInclude = {
     creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
@@ -140,7 +194,18 @@ export async function getPublicProfile(profileId: number) {
     ...memberGroups.filter((m) => !adminGroupIds.has(m.groupId)).map((m) => ({ ...m.group, role: 'member' as const })),
   ];
 
-  return { ...profile, events, posts, groups, servicesContacted };
+  return {
+    ...profile,
+    user: {
+      ...profile.user,
+      mobile: contactVisible ? profile.user.mobile : null,
+      email: contactVisible ? profile.user.email : null,
+    },
+    events,
+    posts,
+    groups,
+    servicesContacted,
+  };
 }
 
 export async function updateProfile(userId: number, data: z.infer<typeof updateProfileSchema>) {
@@ -168,15 +233,46 @@ export async function setReferral(userId: number, input: { referralCode?: string
 
 export async function setPhoto(userId: number, photoUrl: string) {
   const profile = await requireProfile(userId);
+  const oldPhotoUrl = profile.photoUrl;
   const updated = await prisma.profile.update({ where: { id: profile.id }, data: { photoUrl } });
   await recomputeCompletion(profile.id);
+  if (oldPhotoUrl && oldPhotoUrl !== photoUrl) void destroyByUrl(oldPhotoUrl, 'image');
   return updated;
 }
 
-export async function updateEmail(userId: number, email: string) {
+export async function updateEmail(userId: number, email: string | null) {
+  if (email === null) {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { mobile: true } });
+    if (!user?.mobile) throw ApiError.badRequest('Add a phone number before removing your email.');
+    return prisma.user.update({ where: { id: userId }, data: { email: null }, select: { id: true, email: true } });
+  }
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing && existing.id !== userId) throw ApiError.badRequest('That email is already in use.');
   return prisma.user.update({ where: { id: userId }, data: { email }, select: { id: true, email: true } });
+}
+
+export async function updatePhone(userId: number, mobile: string | null) {
+  if (mobile === null) {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (!user?.email) throw ApiError.badRequest('Add an email before removing your phone number.');
+    return prisma.user.update({ where: { id: userId }, data: { mobile: null }, select: { id: true, mobile: true } });
+  }
+  const existing = await prisma.user.findUnique({ where: { mobile } });
+  if (existing && existing.id !== userId) throw ApiError.conflict('That phone number is already in use.');
+  return prisma.user.update({ where: { id: userId }, data: { mobile }, select: { id: true, mobile: true } });
+}
+
+export async function changePassword(userId: number, currentPassword: string | undefined, newPassword: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+  if (!user) throw ApiError.notFound('User not found');
+  if (user.passwordHash) {
+    if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
+      throw ApiError.unauthorized('Current password is incorrect.');
+    }
+  }
+  const passwordHash = await hashPassword(newPassword);
+  await prisma.user.update({ where: { id: userId }, data: { passwordHash, authType: 'password' } });
+  return { changed: true };
 }
 
 // ── Work Gallery (photos + videos) ────────────────────────────
@@ -379,6 +475,12 @@ export async function deleteChild(
   const row = await delegate.findUnique({ where: { id } });
   if (!row || row.profileId !== profile.id) throw ApiError.notFound();
   await delegate.delete({ where: { id } });
+  if ((model === 'profilePet' || model === 'spProduct') && row.photoUrl) {
+    void destroyByUrl(row.photoUrl, 'image');
+  }
+  if (model === 'profileMedia' && row.url) {
+    void destroyByUrl(row.url, row.mediaType === 'video' ? 'video' : 'image');
+  }
   await recomputeCompletion(profile.id);
   return { id, deleted: true };
 }
@@ -558,7 +660,7 @@ export async function updateProduct(
   if (!row || row.profileId !== profile.id) throw ApiError.notFound('Product not found');
   const { customizations, ...product } = input;
   // Replace-all only when the key is present — a PATCH that omits it leaves them alone.
-  return prisma.spProduct.update({
+  const updated = await prisma.spProduct.update({
     where: { id },
     data: {
       ...product,
@@ -568,6 +670,10 @@ export async function updateProduct(
     },
     include: withCustomizations,
   });
+  if (input.photoUrl !== undefined && input.photoUrl !== row.photoUrl && row.photoUrl) {
+    void destroyByUrl(row.photoUrl, 'image');
+  }
+  return updated;
 }
 
 export async function setDelivery(userId: number, input: z.infer<typeof deliverySchema>) {
@@ -660,6 +766,64 @@ export async function setMyPrivacy(userId: number, input: { showCallButton: bool
     create: { profileId: profile.id, showCallButton: input.showCallButton },
   });
   return { showCallButton: row.showCallButton };
+}
+
+export async function getMyVisibility(userId: number) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.profilePrivacySetting.findUnique({ where: { profileId: profile.id } });
+  return { profileVisibility: row?.profileVisibility ?? 'all', contactVisibility: row?.contactVisibility ?? 'only_me' };
+}
+
+export async function setMyVisibility(userId: number, input: z.infer<typeof visibilitySchema>) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.profilePrivacySetting.upsert({
+    where: { profileId: profile.id },
+    update: { ...input },
+    create: {
+      profileId: profile.id,
+      profileVisibility: input.profileVisibility ?? 'all',
+      contactVisibility: input.contactVisibility ?? 'only_me',
+    },
+  });
+  return { profileVisibility: row.profileVisibility, contactVisibility: row.contactVisibility };
+}
+
+const notificationPrefDefaults = {
+  notifyApp: true,
+  notifyWhatsapp: true,
+  notifyEmail: true,
+  alertMessages: true,
+  alertOrders: true,
+  alertPayments: true,
+};
+
+function pickNotificationPrefs(row: typeof notificationPrefDefaults | null | undefined) {
+  return row
+    ? {
+        notifyApp: row.notifyApp,
+        notifyWhatsapp: row.notifyWhatsapp,
+        notifyEmail: row.notifyEmail,
+        alertMessages: row.alertMessages,
+        alertOrders: row.alertOrders,
+        alertPayments: row.alertPayments,
+      }
+    : notificationPrefDefaults;
+}
+
+export async function getMyNotificationPrefs(userId: number) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.profilePrivacySetting.findUnique({ where: { profileId: profile.id } });
+  return pickNotificationPrefs(row);
+}
+
+export async function setMyNotificationPrefs(userId: number, input: z.infer<typeof notificationPrefsSchema>) {
+  const profile = await requireProfile(userId);
+  const row = await prisma.profilePrivacySetting.upsert({
+    where: { profileId: profile.id },
+    update: { ...input },
+    create: { profileId: profile.id, ...notificationPrefDefaults, ...input },
+  });
+  return pickNotificationPrefs(row);
 }
 
 // ── Completion tracking ──────────────────────────────────────

@@ -9,6 +9,7 @@ import {
   eventsRouter,
   groupsRouter,
   serviceProvidersRouter,
+  reviewsRouter,
 } from './modules/discovery/discovery.routes.js';
 import { adminRouter } from './modules/admin/admin.routes.js';
 import { mediaRouter } from './modules/media/media.routes.js';
@@ -16,6 +17,7 @@ import { ordersRouter } from './modules/orders/orders.routes.js';
 import { messagesRouter } from './modules/messages/messages.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
+import { referralsRouter } from './modules/referrals/referrals.routes.js';
 
 export const router = Router();
 
@@ -29,8 +31,10 @@ router.use('/posts', feedRouter);
 router.use('/events', eventsRouter);
 router.use('/groups', groupsRouter);
 router.use('/service-providers', serviceProvidersRouter);
+router.use('/reviews', reviewsRouter);
 router.use('/media', mediaRouter);
 router.use('/orders', ordersRouter);
 router.use('/messages', messagesRouter);
 router.use('/notifications', notificationsRouter);
+router.use('/referrals', referralsRouter);
 router.use('/admin', adminRouter);

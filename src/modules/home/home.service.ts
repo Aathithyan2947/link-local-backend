@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { POINTS_PER_REFERRAL } from '../referrals/referrals.service.js';
 
 /** Resolves a user's active city id (primary membership, else profile address). */
 export async function resolveUserCityId(userId: number): Promise<number | null> {
@@ -138,8 +139,8 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
     city,
     stats: { members: memberCount, serviceProviders: spCount, events: workshopCount },
     referral: {
-      pointsPerReferral: 150,
-      message: 'Earn ₹150 for every friend you refer',
+      pointsPerReferral: POINTS_PER_REFERRAL,
+      message: `Earn ₹${POINTS_PER_REFERRAL} for every friend you refer`,
       balance: stats?.referralPointsBalance ?? 0,
     },
     discussions,

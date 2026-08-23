@@ -6,17 +6,20 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { prisma } from '../../lib/prisma.js';
-import { upload, fileUrl } from '../../middleware/upload.js';
+import { upload } from '../../middleware/upload.js';
+import { uploadBuffer } from '../../lib/cloudinary.js';
 import * as service from './profiles.service.js';
 import {
   availabilitySchema,
   blackoutSchema,
+  changePasswordSchema,
   contactSchema,
   customFieldsSchema,
   deliverySchema,
   educationSchema,
   familySchema,
   hobbySchema,
+  notificationPrefsSchema,
   paymentMethodSchema,
   paymentTermsSchema,
   privacySchema,
@@ -27,7 +30,9 @@ import {
   reportProfileSchema,
   serviceTypesSchema,
   updateEmailSchema,
+  updatePhoneSchema,
   updateProfileSchema,
+  visibilitySchema,
 } from './profiles.schema.js';
 
 export const profilesRouter = Router();
@@ -76,7 +81,8 @@ profilesRouter.post(
   upload.single('photo'),
   asyncHandler(async (req, res) => {
     if (!req.file) throw ApiError.badRequest('photo file is required');
-    ok(res, await service.setPhoto(req.auth!.sub, fileUrl(req.file.filename)));
+    const { url } = await uploadBuffer(req.file.buffer, { folder: 'link-local/profile-photos' });
+    ok(res, await service.setPhoto(req.auth!.sub, url));
   }),
 );
 
@@ -91,6 +97,22 @@ profilesRouter.patch(
   auth,
   validate({ body: updateEmailSchema }),
   asyncHandler(async (req, res) => ok(res, await service.updateEmail(req.auth!.sub, req.body.email))),
+);
+
+profilesRouter.patch(
+  '/me/phone',
+  auth,
+  validate({ body: updatePhoneSchema }),
+  asyncHandler(async (req, res) => ok(res, await service.updatePhone(req.auth!.sub, req.body.mobile))),
+);
+
+profilesRouter.patch(
+  '/me/password',
+  auth,
+  validate({ body: changePasswordSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.changePassword(req.auth!.sub, req.body.currentPassword, req.body.newPassword)),
+  ),
 );
 
 // Marks the SP as having finished the onboarding chain (final step's Confirm).
@@ -108,7 +130,11 @@ profilesRouter.post(
   asyncHandler(async (req, res) => {
     if (!req.file) throw ApiError.badRequest('file is required');
     const mediaType = req.body.mediaType === 'video' ? 'video' : 'photo';
-    ok(res, await service.addMedia(req.auth!.sub, mediaType, fileUrl(req.file.filename)), 201);
+    const { url } = await uploadBuffer(req.file.buffer, {
+      folder: 'link-local/work-gallery',
+      resourceType: mediaType === 'video' ? 'video' : 'image',
+    });
+    ok(res, await service.addMedia(req.auth!.sub, mediaType, url), 201);
   }),
 );
 profilesRouter.delete(
@@ -142,6 +168,9 @@ profilesRouter.post(
   upload.single('photo'),
   asyncHandler(async (req, res) => {
     const body = req.body as Record<string, string>;
+    const photoUrl = req.file
+      ? (await uploadBuffer(req.file.buffer, { folder: 'link-local/pet-photos' })).url
+      : body.photoUrl;
     ok(
       res,
       await service.addPet(req.auth!.sub, {
@@ -149,7 +178,7 @@ profilesRouter.post(
         type: body.type,
         breed: body.breed,
         age: body.age ? Number(body.age) : undefined,
-        photoUrl: req.file ? fileUrl(req.file.filename) : body.photoUrl,
+        photoUrl,
       }),
       201,
     );
@@ -173,7 +202,8 @@ profilesRouter.post(
   upload.single('file'),
   asyncHandler(async (req, res) => {
     if (!req.file) throw ApiError.badRequest('file is required');
-    ok(res, { url: fileUrl(req.file.filename) }, 201);
+    const { url } = await uploadBuffer(req.file.buffer, { folder: 'link-local/custom-fields' });
+    ok(res, { url }, 201);
   }),
 );
 
@@ -206,6 +236,14 @@ profilesRouter.delete('/me/payment-methods/:id', auth, asyncHandler(async (req, 
 profilesRouter.get('/me/privacy', auth, asyncHandler(async (req, res) => ok(res, await service.getMyPrivacy(req.auth!.sub))));
 profilesRouter.put('/me/privacy', auth, validate({ body: privacySchema }), asyncHandler(async (req, res) => ok(res, await service.setMyPrivacy(req.auth!.sub, req.body))));
 
+// Profile / Contact Details visibility (all members)
+profilesRouter.get('/me/visibility', auth, asyncHandler(async (req, res) => ok(res, await service.getMyVisibility(req.auth!.sub))));
+profilesRouter.put('/me/visibility', auth, validate({ body: visibilitySchema }), asyncHandler(async (req, res) => ok(res, await service.setMyVisibility(req.auth!.sub, req.body))));
+
+// Notifications & Alerts prefs
+profilesRouter.get('/me/notification-prefs', auth, asyncHandler(async (req, res) => ok(res, await service.getMyNotificationPrefs(req.auth!.sub))));
+profilesRouter.put('/me/notification-prefs', auth, validate({ body: notificationPrefsSchema }), asyncHandler(async (req, res) => ok(res, await service.setMyNotificationPrefs(req.auth!.sub, req.body))));
+
 profilesRouter.post(
   '/:id/share',
   auth,
@@ -220,4 +258,4 @@ profilesRouter.post(
 );
 
 // Public profile view (any member). Declared last so it never shadows /me/*.
-profilesRouter.get('/:id', auth, asyncHandler(async (req, res) => ok(res, await service.getPublicProfile(Number(req.params.id)))));
+profilesRouter.get('/:id', auth, asyncHandler(async (req, res) => ok(res, await service.getPublicProfile(Number(req.params.id), req.auth!.sub))));

@@ -7,7 +7,8 @@ import { validate, getValidatedQuery } from '../../middleware/validate.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok, paginated } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { upload, fileUrl } from '../../middleware/upload.js';
+import { upload } from '../../middleware/upload.js';
+import { uploadBuffer } from '../../lib/cloudinary.js';
 import * as service from './addresses.service.js';
 import { recomputeCompletion } from '../profiles/profiles.service.js';
 import { writeAudit } from '../admin/audit.js';
@@ -86,11 +87,12 @@ addressesRouter.post(
     if (!req.file) throw ApiError.badRequest('document file is required');
     const docType = (req.body.docType as string) || 'other';
     const description = (req.body.description as string)?.trim() || undefined;
+    const { url } = await uploadBuffer(req.file.buffer, { folder: 'link-local/address-proofs' });
     const doc = await service.addVerificationDoc({
       userId: req.auth!.sub,
       docType,
       description,
-      docUrl: fileUrl(req.file.filename),
+      docUrl: url,
     });
     ok(res, doc, 201);
   }),

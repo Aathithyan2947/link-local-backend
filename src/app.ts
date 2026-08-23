@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { createRequire } from 'node:module';
 import express, { type RequestHandler } from 'express';
 import cors from 'cors';
@@ -40,9 +39,6 @@ export function createApp() {
       legacyHeaders: false,
     }),
   );
-
-  // Serve uploaded files
-  app.use(`/${env.UPLOAD_DIR}`, express.static(path.resolve(process.cwd(), env.UPLOAD_DIR)));
 
   // Health check
   app.get('/health', (_req, res) => ok(res, { status: 'ok', service: 'link-local-api' }));

@@ -669,6 +669,18 @@ model ProfilePrivacySetting {
   id                           Int     @id @default(autoincrement())
   profileId                    Int     @unique @map("profile_id")
   showCallButton               Boolean @default(false) @map("show_call_button")
+  // Simple radio-choice visibility (all | area | apartment | only_me [| has_ordered, contact only]).
+  // Deliberately not routed through *VisibilityCircleId below — those model a generic
+  // user-managed circle system with no UI anywhere; these two mirror the fixed radio options
+  // the app actually exposes on the Profile Visibility / Contact Details Visibility screens.
+  profileVisibility            String  @default("all") @map("profile_visibility")
+  contactVisibility            String  @default("only_me") @map("contact_visibility")
+  notifyApp                    Boolean @default(true) @map("notify_app")
+  notifyWhatsapp               Boolean @default(true) @map("notify_whatsapp")
+  notifyEmail                  Boolean @default(true) @map("notify_email")
+  alertMessages                Boolean @default(true) @map("alert_messages")
+  alertOrders                  Boolean @default(true) @map("alert_orders")
+  alertPayments                Boolean @default(true) @map("alert_payments")
   profileVisibilityCircleId    Int? @map("profile_visibility_circle_id")
   searchVisibilityCircleId     Int? @map("search_visibility_circle_id")
   nameVisibilityCircleId       Int? @map("name_visibility_circle_id")
@@ -1416,6 +1428,8 @@ model Referral {
   id                       Int       @id @default(autoincrement())
   referrerId               Int       @map("referrer_id")
   referredUserId           Int?      @map("referred_user_id")
+  referredName             String?   @map("referred_name")
+  referredPhone            String?   @map("referred_phone")
   referralSourceId         Int?      @map("referral_source_id")
   eventId                  Int?      @map("event_id")
   cityId                   Int?      @map("city_id")
@@ -1662,6 +1676,7 @@ model OrderPayment {
   amount         Decimal   @db.Decimal(10, 2)
   paymentType    String    @map("payment_type") // advance | partial | final | refund
   paymentMethod  String?   @map("payment_method") // cash | upi | card | net_banking | bank_transfer
+  paymentSubMethod String? @map("payment_sub_method") // e.g. "GPay", "PhonePe" — brand-level detail within paymentMethod
   paymentStatus  String    @map("payment_status") // pending | paid | failed | refunded
   transactionRef String?   @map("transaction_ref")
   paidAt         DateTime? @map("paid_at")

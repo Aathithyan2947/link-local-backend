@@ -166,8 +166,31 @@ export const privacySchema = z.object({
   showCallButton: z.boolean(),
 });
 
+export const visibilitySchema = z.object({
+  profileVisibility: z.enum(['all', 'area', 'apartment', 'only_me']).optional(),
+  contactVisibility: z.enum(['all', 'area', 'apartment', 'only_me', 'has_ordered']).optional(),
+});
+
+export const notificationPrefsSchema = z.object({
+  notifyApp: z.boolean().optional(),
+  notifyWhatsapp: z.boolean().optional(),
+  notifyEmail: z.boolean().optional(),
+  alertMessages: z.boolean().optional(),
+  alertOrders: z.boolean().optional(),
+  alertPayments: z.boolean().optional(),
+});
+
 export const updateEmailSchema = z.object({
-  email: z.string().email(),
+  email: z.string().email().nullable(),
+});
+
+export const updatePhoneSchema = z.object({
+  mobile: z.string().min(6).max(15).nullable(),
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().optional(),
+  newPassword: z.string().min(6).max(72),
 });
 
 export const reportProfileSchema = z.object({
