@@ -1,6 +1,8 @@
 import type { NextFunction, Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
+import { MulterError } from 'multer';
 import { ApiError } from '../utils/ApiError.js';
+import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 
 export function notFoundHandler(req: Request, _res: Response, next: NextFunction) {
@@ -32,6 +34,14 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
 
   if (err instanceof Prisma.PrismaClientValidationError) {
     return res.status(400).json({ success: false, message: 'Invalid query parameters' });
+  }
+
+  if (err instanceof MulterError) {
+    const message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? `File is too large. Max size is ${env.MAX_UPLOAD_MB}MB.`
+        : err.message;
+    return res.status(400).json({ success: false, message });
   }
 
   logger.error({ err }, 'Unhandled error');

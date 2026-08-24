@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { bumpUserStats } from '../../lib/stats.js';
@@ -16,6 +17,29 @@ const orderInclude = {
   scheduledSlot: true,
   deliveryAddress: { select: { fullAddress: true } },
 };
+
+/**
+ * How much is due right now for this order. Only product orders respect the SP's configured
+ * `partial_advance` % — booking orders are left at the full amount, since the same `payOrder`
+ * path also serves `createDirectPayment` (an ad-hoc, resident-typed amount for direct-negotiated
+ * services, not a computed order total), and the two aren't distinguishable without a schema
+ * change; applying a partial-advance % there would silently under-charge a manually agreed sum.
+ */
+async function computeAmountDue(order: { id: number; orderKind: string; spProfileId: number; totalAmount: Prisma.Decimal | number }): Promise<number> {
+  const total = Number(order.totalAmount);
+  if (order.orderKind !== 'product') return total;
+  const terms = await prisma.spPaymentTerm.findUnique({ where: { profileId: order.spProfileId } });
+  if (terms?.paymentTerms !== 'partial_advance') return total;
+  const pct = Number(terms.partialAdvancePct ?? 100);
+  return Math.round(((total * pct) / 100) * 100) / 100;
+}
+
+async function attachAmountDue<T extends { id: number; orderKind: string; spProfileId: number; totalAmount: Prisma.Decimal }>(
+  order: T | null,
+): Promise<(T & { amountDue: number }) | null> {
+  if (!order) return null;
+  return { ...order, amountDue: await computeAmountDue(order) };
+}
 
 // ── Fees ─────────────────────────────────────────────────────
 export interface OrderFees {
@@ -222,7 +246,7 @@ export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
     entityType: 'order',
     entityId: orderId,
   });
-  return prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
+  return attachAmountDue(await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude }));
 }
 
 // ── Service booking (request → accept → pay) ─────────────────
@@ -291,7 +315,7 @@ export async function placeBooking(buyerId: number, data: PlaceBookingInput) {
     entityType: 'order',
     entityId: orderId,
   });
-  return prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
+  return attachAmountDue(await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude }));
 }
 
 /**
@@ -328,7 +352,7 @@ export async function createDirectPayment(buyerId: number, spProfileId: number, 
       acceptedAt: new Date(),
     },
   });
-  return prisma.order.findUnique({ where: { id: order.id }, include: orderInclude });
+  return attachAmountDue(await prisma.order.findUnique({ where: { id: order.id }, include: orderInclude }));
 }
 
 /** Materialize + lock a slot for an order (used by both product and booking placement). */
@@ -361,7 +385,7 @@ export async function getOrder(id: number, viewerId: number) {
   if (order.buyerId !== viewerId && order.spProfile.userId !== viewerId) {
     throw ApiError.forbidden('You cannot view this order');
   }
-  return order;
+  return attachAmountDue(order);
 }
 
 export async function myOrders(buyerId: number) {
@@ -410,7 +434,7 @@ export async function acceptOrder(orderId: number, spUserId: number) {
     entityType: 'order',
     entityId: orderId,
   });
-  return updated;
+  return attachAmountDue(updated);
 }
 
 /** SP rejects: frees any held slot and notifies the buyer. */
@@ -515,7 +539,7 @@ export async function payOrder(
     throw ApiError.badRequest('This booking is not ready for payment yet');
   }
 
-  const amount = Number(order.totalAmount);
+  const amount = await computeAmountDue(order);
   const charge = mockCharge(amount); // MOCK gateway
   const payment = await prisma.orderPayment.create({
     data: {
