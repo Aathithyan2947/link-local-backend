@@ -17,6 +17,15 @@ const envSchema = z.object({
   CLOUDINARY_CLOUD_NAME: z.string().min(1, 'CLOUDINARY_CLOUD_NAME is required'),
   CLOUDINARY_API_KEY: z.string().min(1, 'CLOUDINARY_API_KEY is required'),
   CLOUDINARY_API_SECRET: z.string().min(1, 'CLOUDINARY_API_SECRET is required'),
+  // Google Maps server key, used only for reverse geocoding. Deliberately optional:
+  // without it /geo/reverse serves cache-only rather than the whole API refusing
+  // to boot, so a missing key degrades one feature instead of the deployment.
+  GOOGLE_MAPS_SERVER_KEY: z.string().optional(),
+  // Hard ceiling on billed geocoding calls per day. Past it the endpoint serves
+  // cache only, so a runaway client or a leaked key cannot run up an open bill.
+  GEO_DAILY_LIMIT: z.coerce.number().default(2000),
+  // Biases geocoding results to a country. India-only for now.
+  GEO_REGION: z.string().default('in'),
   // Set to "true" to return the OTP in the API response even in production
   // (for device testing against a hosted backend before SMS/email is wired up).
   EXPOSE_OTP: z.string().optional(),

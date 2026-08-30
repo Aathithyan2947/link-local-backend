@@ -14,6 +14,12 @@ export const createAddressSchema = z.object({
   fullAddress: z.string().min(1),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
+  // How the pin was captured — see Address.accuracyM in the Prisma schema for why
+  // this is worth storing. Null accuracy is meaningful: a hand-placed pin is a
+  // placement, not a measurement.
+  accuracyM: z.number().nonnegative().optional(),
+  locationSource: z.enum(['gps', 'cached', 'manual_pin', 'master', 'mocked']).optional(),
+  googlePlaceId: z.string().optional(),
 });
 
 // Nearby Address Master lookup — maps the user's GPS pin to the closest approved locality.

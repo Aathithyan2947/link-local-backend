@@ -48,6 +48,10 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
       fullAddress: input.fullAddress,
       latitude: input.latitude,
       longitude: input.longitude,
+      accuracyM: input.accuracyM,
+      locationSource: input.locationSource,
+      googlePlaceId: input.googlePlaceId,
+      geocodedAt: input.latitude != null ? new Date() : undefined,
     },
   });
 
@@ -74,6 +78,7 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
     pincode: input.pincode,
     latitude: input.latitude,
     longitude: input.longitude,
+    googlePlaceId: input.googlePlaceId,
     userId,
   });
 
@@ -299,6 +304,7 @@ interface MasterSubmission {
   pincode?: string;
   latitude?: number;
   longitude?: number;
+  googlePlaceId?: string;
   userId?: number;
 }
 
@@ -361,6 +367,7 @@ export async function upsertMasterFromSubmission(input: MasterSubmission) {
       pincode,
       latitude: input.latitude,
       longitude: input.longitude,
+      googlePlaceId: input.googlePlaceId,
       status: 'pending',
       source: 'user',
       submittedBy: input.userId,

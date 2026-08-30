@@ -100,15 +100,15 @@ model ServiceSubcategory {
 
 /// Admin-configured dynamic profile fields per service subcategory.
 model ServiceSubcategoryField {
-  id            Int     @id @default(autoincrement())
-  subcategoryId Int     @map("subcategory_id")
-  fieldName     String  @map("field_name")
-  fieldType     String  @map("field_type") // text | number | date | dropdown | boolean | file | menu | pincode
-  fieldOptions  String? @map("field_options") // JSON array of options if field_type = dropdown
-  category      String  @default("basic_details") // basic_details | travel | payment | service_type | delivery
-  isRequired    Boolean @default(false) @map("is_required")
-  sortOrder     Int     @default(0) @map("sort_order")
-  isActive      Boolean @default(true) @map("is_active")
+  id               Int     @id @default(autoincrement())
+  subcategoryId    Int     @map("subcategory_id")
+  fieldName        String  @map("field_name")
+  fieldType        String  @map("field_type") // text | number | date | dropdown | boolean | file | menu | pincode
+  fieldOptions     String? @map("field_options") // JSON array of options if field_type = dropdown
+  category         String  @default("basic_details") // basic_details | travel | payment | service_type | delivery
+  isRequired       Boolean @default(false) @map("is_required")
+  sortOrder        Int     @default(0) @map("sort_order")
+  isActive         Boolean @default(true) @map("is_active")
   // Conditional visibility: only shown to the SP when the field `dependsOnFieldId` currently
   // holds the value `dependsOnValue`. Null (the default) means always shown.
   dependsOnFieldId Int?    @map("depends_on_field_id")
@@ -155,7 +155,7 @@ model EducationMaster {
 }
 
 model ProfessionMaster {
-  id       Int    @id @default(autoincrement())
+  id       Int     @id @default(autoincrement())
   category String // Salaried | Business | Freelancer | Consultant | Student | Retired | Advisor | On-Contract
   // User-suggested "Other" professions land as isActive=false (pending) and stay hidden
   // from the app's picker until an admin approves them.
@@ -461,17 +461,27 @@ model UserDevice {
 // ─────────────────────────────────────────────────────────────
 
 model Address {
-  id          Int      @id @default(autoincrement())
-  areaId      Int      @map("area_id")
-  flatWing    String?  @map("flat_wing")
-  apartment   String?
-  lane1       String?
-  lane2       String?
-  fullAddress String?  @map("full_address")
-  latitude    Decimal? @db.Decimal(10, 7)
-  longitude   Decimal? @db.Decimal(10, 7)
-  isActive    Boolean  @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at")
+  id             Int       @id @default(autoincrement())
+  areaId         Int       @map("area_id")
+  flatWing       String?   @map("flat_wing")
+  apartment      String?
+  lane1          String?
+  lane2          String?
+  fullAddress    String?   @map("full_address")
+  latitude       Decimal?  @db.Decimal(10, 7)
+  longitude      Decimal?  @db.Decimal(10, 7)
+  /// How the pin above was captured. Without these a surveyed doorstep and a
+  /// 2 km cached network guess are indistinguishable once stored, so there is
+  /// no way to find and re-verify the bad ones.
+  /// accuracyM is null for a hand-placed pin — that is a placement, not a
+  /// measurement, and recording it as 0 would read as a flawless fix.
+  accuracyM      Decimal?  @map("accuracy_m") @db.Decimal(8, 2)
+  /// gps | cached | manual_pin | master | mocked
+  locationSource String?   @map("location_source")
+  googlePlaceId  String?   @map("google_place_id")
+  geocodedAt     DateTime? @map("geocoded_at")
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   area              Area                     @relation(fields: [areaId], references: [id])
   verificationDocs  AddressVerificationDoc[]
@@ -483,18 +493,18 @@ model Address {
 }
 
 model AddressVerificationDoc {
-  id         Int       @id @default(autoincrement())
-  addressId  Int       @map("address_id")
-  cityId     Int       @map("city_id")
-  docType    String    @map("doc_type")
+  id          Int       @id @default(autoincrement())
+  addressId   Int       @map("address_id")
+  cityId      Int       @map("city_id")
+  docType     String    @map("doc_type")
   // Optional member-entered title for the document — mainly to describe an "Other" proof so
   // the admin knows what they're reviewing.
-  description String?  @map("description")
-  docUrl     String    @map("doc_url")
-  status     String? // pending | approved | rejected
-  reviewedBy Int?      @map("reviewed_by")
-  reviewedAt DateTime? @map("reviewed_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
+  description String?   @map("description")
+  docUrl      String    @map("doc_url")
+  status      String? // pending | approved | rejected
+  reviewedBy  Int?      @map("reviewed_by")
+  reviewedAt  DateTime? @map("reviewed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
 
   address  Address @relation(fields: [addressId], references: [id])
   city     City    @relation(fields: [cityId], references: [id])
@@ -510,27 +520,54 @@ model AddressVerificationDoc {
 /// plot numbers (those stay private on `Address`). New localities a user introduces are
 /// queued as `pending` and only become suggestions to others once an admin approves them.
 model AddressMaster {
-  id          Int       @id @default(autoincrement())
-  cityId      Int       @map("city_id")
-  complex     String? // building / complex name (from the curated directory; used for search autofill — never a user's flat/plot)
-  lane1       String?
-  lane2       String?
-  area        String? // areaName / locality
-  suburb      String?
-  pincode     String?
-  latitude    Decimal?  @db.Decimal(10, 7)
-  longitude   Decimal?  @db.Decimal(10, 7)
-  status      String    @default("pending") // pending | approved | rejected
-  source      String    @default("user") // user | admin | import
-  submittedBy Int?      @map("submitted_by")
-  reviewedBy  Int?      @map("reviewed_by")
-  reviewedAt  DateTime? @map("reviewed_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
+  id            Int       @id @default(autoincrement())
+  cityId        Int       @map("city_id")
+  complex       String? // building / complex name (from the curated directory; used for search autofill — never a user's flat/plot)
+  lane1         String?
+  lane2         String?
+  area          String? // areaName / locality
+  suburb        String?
+  pincode       String?
+  latitude      Decimal?  @db.Decimal(10, 7)
+  longitude     Decimal?  @db.Decimal(10, 7)
+  /// Lets a curated locality be re-checked against Google later without
+  /// re-geocoding it from its free-text fields.
+  googlePlaceId String?   @map("google_place_id")
+  status        String    @default("pending") // pending | approved | rejected
+  source        String    @default("user") // user | admin | import
+  submittedBy   Int?      @map("submitted_by")
+  reviewedBy    Int?      @map("reviewed_by")
+  reviewedAt    DateTime? @map("reviewed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
 
   city City @relation(fields: [cityId], references: [id])
 
   @@index([cityId, status])
   @@map("address_master")
+}
+
+/// Cached reverse-geocode responses. Geocoding is billed per call, and members
+/// pin the same buildings over and over, so this is the difference between a
+/// trivial monthly bill and an open-ended one.
+///
+/// The key is lat/lng rounded to 4 decimal places — an ~11 m grid. Two pins that
+/// round into the same cell always resolve to the same street address, so the
+/// rounding costs no accuracy. Row count for the current day also doubles as the
+/// billed-calls counter behind GEO_DAILY_LIMIT: a cache hit is never billed, so
+/// every billed call is a row written.
+model GeocodeCache {
+  id        Int      @id @default(autoincrement())
+  latKey    Decimal  @map("lat_key") @db.Decimal(10, 4)
+  lngKey    Decimal  @map("lng_key") @db.Decimal(10, 4)
+  provider  String   @default("google")
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@unique([latKey, lngKey, provider])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("geocode_cache")
 }
 
 model VisibilityCircle {
@@ -681,17 +718,17 @@ model ProfilePrivacySetting {
   alertMessages                Boolean @default(true) @map("alert_messages")
   alertOrders                  Boolean @default(true) @map("alert_orders")
   alertPayments                Boolean @default(true) @map("alert_payments")
-  profileVisibilityCircleId    Int? @map("profile_visibility_circle_id")
-  searchVisibilityCircleId     Int? @map("search_visibility_circle_id")
-  nameVisibilityCircleId       Int? @map("name_visibility_circle_id")
-  ageVisibilityCircleId        Int? @map("age_visibility_circle_id")
-  genderVisibilityCircleId     Int? @map("gender_visibility_circle_id")
-  addressVisibilityCircleId    Int? @map("address_visibility_circle_id")
-  educationVisibilityCircleId  Int? @map("education_visibility_circle_id")
-  professionVisibilityCircleId Int? @map("profession_visibility_circle_id")
-  contactVisibilityCircleId    Int? @map("contact_visibility_circle_id")
-  messagingAccessCircleId      Int? @map("messaging_access_circle_id")
-  ratingsVisibilityCircleId    Int? @map("ratings_visibility_circle_id")
+  profileVisibilityCircleId    Int?    @map("profile_visibility_circle_id")
+  searchVisibilityCircleId     Int?    @map("search_visibility_circle_id")
+  nameVisibilityCircleId       Int?    @map("name_visibility_circle_id")
+  ageVisibilityCircleId        Int?    @map("age_visibility_circle_id")
+  genderVisibilityCircleId     Int?    @map("gender_visibility_circle_id")
+  addressVisibilityCircleId    Int?    @map("address_visibility_circle_id")
+  educationVisibilityCircleId  Int?    @map("education_visibility_circle_id")
+  professionVisibilityCircleId Int?    @map("profession_visibility_circle_id")
+  contactVisibilityCircleId    Int?    @map("contact_visibility_circle_id")
+  messagingAccessCircleId      Int?    @map("messaging_access_circle_id")
+  ratingsVisibilityCircleId    Int?    @map("ratings_visibility_circle_id")
 
   profile Profile @relation(fields: [profileId], references: [id])
 
@@ -699,21 +736,21 @@ model ProfilePrivacySetting {
 }
 
 model ProfileEducation {
-  id                Int  @id @default(autoincrement())
-  profileId         Int  @map("profile_id")
-  educationMasterId Int? @map("education_master_id")
-  schoolMasterId    Int? @map("school_master_id")
-  collegeMasterId   Int? @map("college_master_id")
+  id                Int     @id @default(autoincrement())
+  profileId         Int     @map("profile_id")
+  educationMasterId Int?    @map("education_master_id")
+  schoolMasterId    Int?    @map("school_master_id")
+  collegeMasterId   Int?    @map("college_master_id")
   // Per-user education details. The shared masters (degree / school / college) are curated
   // catalogs; a member's chosen names + cities are denormalized here for display.
-  degree          String?
-  schoolName      String? @map("school_name")
-  schoolCity      String? @map("school_city")
-  collegeName     String? @map("college_name")
-  collegeCity     String? @map("college_city")
-  university      String?
-  postGradCollege String? @map("post_grad_college")
-  postGradCity    String? @map("post_grad_city")
+  degree            String?
+  schoolName        String? @map("school_name")
+  schoolCity        String? @map("school_city")
+  collegeName       String? @map("college_name")
+  collegeCity       String? @map("college_city")
+  university        String?
+  postGradCollege   String? @map("post_grad_college")
+  postGradCity      String? @map("post_grad_city")
 
   profile         Profile          @relation(fields: [profileId], references: [id])
   educationMaster EducationMaster? @relation(fields: [educationMasterId], references: [id])
@@ -871,20 +908,20 @@ model SpProductCustomization {
 }
 
 model SpDeliveryPreference {
-  id                  Int      @id @default(autoincrement())
-  profileId           Int      @unique @map("profile_id")
-  deliveryTimingType  String?  @map("delivery_timing_type") // after_24h | after_48h | after_confirmation
-  offersHomeDelivery  Boolean  @default(false) @map("offers_home_delivery")
-  deliveryRadiusKm    Decimal? @map("delivery_radius_km") @db.Decimal(5, 2)
-  minOrderAmount      Decimal? @map("min_order_amount") @db.Decimal(10, 2)
-  deliveryCharge      Decimal? @map("delivery_charge") @db.Decimal(10, 2)
-  deliveryTimeMinutes Int?     @map("delivery_time_minutes")
-  offersPickup        Boolean  @default(false) @map("offers_pickup")
-  pickupAddressId     Int?     @map("pickup_address_id")
-  deliveryNotes       String?  @map("delivery_notes")
-  packagingCharge      Decimal? @map("packaging_charge") @db.Decimal(10, 2)
+  id                    Int      @id @default(autoincrement())
+  profileId             Int      @unique @map("profile_id")
+  deliveryTimingType    String?  @map("delivery_timing_type") // after_24h | after_48h | after_confirmation
+  offersHomeDelivery    Boolean  @default(false) @map("offers_home_delivery")
+  deliveryRadiusKm      Decimal? @map("delivery_radius_km") @db.Decimal(5, 2)
+  minOrderAmount        Decimal? @map("min_order_amount") @db.Decimal(10, 2)
+  deliveryCharge        Decimal? @map("delivery_charge") @db.Decimal(10, 2)
+  deliveryTimeMinutes   Int?     @map("delivery_time_minutes")
+  offersPickup          Boolean  @default(false) @map("offers_pickup")
+  pickupAddressId       Int?     @map("pickup_address_id")
+  deliveryNotes         String?  @map("delivery_notes")
+  packagingCharge       Decimal? @map("packaging_charge") @db.Decimal(10, 2)
   freeDeliveryThreshold Decimal? @map("free_delivery_threshold") @db.Decimal(10, 2)
-  orderLeadTimeHours   Int?     @map("order_lead_time_hours") // Figma "1 day / 12 hours in advance"
+  orderLeadTimeHours    Int?     @map("order_lead_time_hours") // Figma "1 day / 12 hours in advance"
 
   profile       Profile  @relation(fields: [profileId], references: [id])
   pickupAddress Address? @relation(fields: [pickupAddressId], references: [id])
@@ -1671,16 +1708,16 @@ model OrderItem {
 }
 
 model OrderPayment {
-  id             Int       @id @default(autoincrement())
-  orderId        Int       @map("order_id")
-  amount         Decimal   @db.Decimal(10, 2)
-  paymentType    String    @map("payment_type") // advance | partial | final | refund
-  paymentMethod  String?   @map("payment_method") // cash | upi | card | net_banking | bank_transfer
-  paymentSubMethod String? @map("payment_sub_method") // e.g. "GPay", "PhonePe" — brand-level detail within paymentMethod
-  paymentStatus  String    @map("payment_status") // pending | paid | failed | refunded
-  transactionRef String?   @map("transaction_ref")
-  paidAt         DateTime? @map("paid_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  id               Int       @id @default(autoincrement())
+  orderId          Int       @map("order_id")
+  amount           Decimal   @db.Decimal(10, 2)
+  paymentType      String    @map("payment_type") // advance | partial | final | refund
+  paymentMethod    String?   @map("payment_method") // cash | upi | card | net_banking | bank_transfer
+  paymentSubMethod String?   @map("payment_sub_method") // e.g. "GPay", "PhonePe" — brand-level detail within paymentMethod
+  paymentStatus    String    @map("payment_status") // pending | paid | failed | refunded
+  transactionRef   String?   @map("transaction_ref")
+  paidAt           DateTime? @map("paid_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
 
   order Order @relation(fields: [orderId], references: [id])
 
