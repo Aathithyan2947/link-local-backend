@@ -1376,6 +1376,11 @@ model InterestGroupMember {
   status        String // joined | exited | pending_approval
   paymentStatus String?  @map("payment_status") // paid | unpaid | refunded
   joinedAt      DateTime @default(now()) @map("joined_at")
+  /// Per-member notification mute for this group.
+  muted         Boolean  @default(false)
+  /// "Clear chat" is per-member and non-destructive: posts older than this are hidden from
+  /// THIS member only, so one person clearing their view never deletes the group's history.
+  chatClearedAt DateTime? @map("chat_cleared_at")
 
   group InterestGroup @relation(fields: [groupId], references: [id])
   user  User          @relation(fields: [userId], references: [id])

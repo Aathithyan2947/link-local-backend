@@ -75,6 +75,91 @@ export function addressScopeFilter(
   return ctx.cityId ? { area: { cityId: ctx.cityId } } : {};
 }
 
+export const HOME_SCOPES: readonly HomeScope[] = ['society', 'lane', 'area', 'city'] as const;
+
+export type ScopeCounts = Record<HomeScope, number>;
+
+/** How many results each My Society/Lane/Area/City chip would surface — the badge next to
+ *  the chip label. Counts the three things the search bar can actually turn up (service
+ *  providers + events + groups), which is what Discover's "All" tab searches across.
+ *
+ *  `addressScopeFilter` degrades to the next broader level when the caller hasn't filled in
+ *  an apartment or lane, so two chips frequently resolve to an identical query; identical
+ *  filters are counted once and the result shared, keeping this to 3-6 counts rather than 12. */
+async function countByScope(
+  userId: number,
+  ctx: ScopeContext,
+  overrideAreaId: number | null,
+): Promise<ScopeCounts> {
+  const keyOf: Record<string, string> = {};
+  const unique = new Map<string, Record<string, unknown>>();
+  for (const scope of HOME_SCOPES) {
+    const filter = addressScopeFilter(scope, ctx, overrideAreaId);
+    const key = JSON.stringify(filter);
+    keyOf[scope] = key;
+    if (!unique.has(key)) unique.set(key, filter);
+  }
+
+  const entries = [...unique.entries()];
+  const totals = await Promise.all(
+    entries.map(async ([, filter]) => {
+      const has = Object.keys(filter).length > 0;
+      const creatorWhere = has ? { creator: { profile: { address: filter } } } : {};
+      const spWhere = has ? { address: filter } : {};
+      const [sps, events, groups] = await Promise.all([
+        prisma.profile.count({
+          where: { user: { id: { not: userId }, userType: 'service_provider', isActive: true }, ...spWhere },
+        }),
+        prisma.event.count({ where: { isActive: true, ...creatorWhere } }),
+        prisma.interestGroup.count({ where: { isActive: true, ...creatorWhere } }),
+      ]);
+      return sps + events + groups;
+    }),
+  );
+
+  const byKey = new Map(entries.map(([key], i) => [key, totals[i]]));
+  return {
+    society: byKey.get(keyOf.society) ?? 0,
+    lane: byKey.get(keyOf.lane) ?? 0,
+    area: byKey.get(keyOf.area) ?? 0,
+    city: byKey.get(keyOf.city) ?? 0,
+  };
+}
+
+/** The service-type shortcut row above the provider list: which services actually exist in
+ *  scope and how many providers offer each. Counted across every provider in scope rather
+ *  than derived from the 8 returned items, so the badge is a real total and the busiest
+ *  services lead — the client can only see whichever handful the page happened to include. */
+async function countByService(userId: number, spWhere: Record<string, unknown>, take = 6) {
+  const grouped = await prisma.profileServiceType.groupBy({
+    by: ['subcategoryId'],
+    where: {
+      profile: { user: { id: { not: userId }, userType: 'service_provider', isActive: true }, ...spWhere },
+      // Every category ends in an "Other" catch-all. It is a real subcategory providers pick,
+      // but as a browse shortcut it says nothing, and it outranks named services often enough
+      // to take one of the three visible slots.
+      NOT: { subcategory: { name: { in: ['Other', 'Others'] } } },
+    },
+    _count: { profileId: true },
+    orderBy: { _count: { profileId: 'desc' } },
+    take,
+  });
+  if (grouped.length === 0) return [];
+
+  const subs = await prisma.serviceSubcategory.findMany({
+    where: { id: { in: grouped.map((g) => g.subcategoryId) } },
+    select: { id: true, name: true, category: { select: { name: true } } },
+  });
+  const byId = new Map(subs.map((s) => [s.id, s]));
+
+  return grouped
+    .map((g) => {
+      const sub = byId.get(g.subcategoryId);
+      return sub ? { id: sub.id, name: sub.name, category: sub.category.name, count: g._count.profileId } : null;
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+}
+
 /** Aggregated payload powering the Home screen. */
 export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; areaId?: number } = {}) {
   const scope = opts.scope ?? 'city';
@@ -93,12 +178,13 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
   const spCityWhere = hasFilter ? { address: addressFilter } : {};
   const memberWhere = hasFilter ? { address: addressFilter } : {};
 
-  const [discussions, groups, workshops, serviceProviders, groupCount, workshopCount, spCount, memberCount, stats] =
+  const [discussions, groups, workshops, serviceProviders, groupCount, workshopCount, spCount, memberCount, stats, scopeCounts, spServices] =
     await Promise.all([
       prisma.post.findMany({
         where: { isActive: true, ...postCityWhere },
         orderBy: { createdAt: 'desc' },
-        take: 5,
+        // Home shows at most 3 discussions, then "See all discussions".
+        take: 3,
         include: {
           user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
           _count: { select: { likes: true, comments: true } },
@@ -120,9 +206,12 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
       prisma.profile.findMany({
         where: { user: { id: { not: userId }, userType: 'service_provider', isActive: true }, ...spCityWhere },
         orderBy: { createdAt: 'desc' },
-        take: 8,
+        // Home shows 3 by default, but tapping a service shortcut filters this same list
+        // client-side against the shortcut's badge count — too small a page and the list
+        // comes up visibly short of the number on the badge.
+        take: 20,
         include: {
-          serviceTypes: { include: { subcategory: true }, take: 2 },
+          serviceTypes: { include: { subcategory: true }, take: 4 },
           _count: { select: { ratings: true } },
         },
       }),
@@ -133,6 +222,8 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
       }),
       prisma.profile.count({ where: memberWhere }),
       prisma.userStats.findUnique({ where: { userId } }),
+      countByScope(userId, ctx, overrideAreaId),
+      countByService(userId, spCityWhere),
     ]);
 
   return {
@@ -146,6 +237,7 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
     discussions,
     groups: { total: groupCount, items: groups },
     workshops: { total: workshopCount, items: workshops },
-    serviceProviders: { total: spCount, items: serviceProviders },
+    serviceProviders: { total: spCount, items: serviceProviders, services: spServices },
+    scopeCounts,
   };
 }

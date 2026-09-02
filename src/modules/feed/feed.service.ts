@@ -1,7 +1,13 @@
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
-import { resolveUserCityId } from '../home/home.service.js';
+import {
+  addressScopeFilter,
+  resolveUserCityId,
+  resolveUserScopeContext,
+  sanitizeAreaOverride,
+  type HomeScope,
+} from '../home/home.service.js';
 import { bumpUserStats } from '../../lib/stats.js';
 import { emitNotification } from '../../lib/notify.js';
 
@@ -25,11 +31,25 @@ async function likedSet(userId: number, postIds: number[]): Promise<Set<number>>
   return new Set(rows.map((r) => r.postId));
 }
 
-export async function listPosts(userId: number, params: PaginationParams & { postType?: string }) {
-  const cityId = await resolveUserCityId(userId);
+export async function listPosts(
+  userId: number,
+  params: PaginationParams & { postType?: string; scope?: HomeScope; areaId?: number },
+) {
   const where: Record<string, unknown> = { isActive: true };
   if (params.postType) where.postType = params.postType;
-  if (cityId) where.user = { profile: { address: { area: { cityId } } } };
+
+  // Home's Community Discussions header can be re-scoped to a single area, the same way the
+  // service-provider / workshop / group sections already are. Without a scope or area this
+  // stays exactly as it was: everything in the caller's own city.
+  if (params.scope || params.areaId !== undefined) {
+    const ctx = await resolveUserScopeContext(userId);
+    const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
+    const filter = addressScopeFilter(params.scope ?? 'area', ctx, overrideAreaId);
+    if (Object.keys(filter).length > 0) where.user = { profile: { address: filter } };
+  } else {
+    const cityId = await resolveUserCityId(userId);
+    if (cityId) where.user = { profile: { address: { area: { cityId } } } };
+  }
 
   const [items, total] = await Promise.all([
     prisma.post.findMany({

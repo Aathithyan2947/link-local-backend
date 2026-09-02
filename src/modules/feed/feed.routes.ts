@@ -11,6 +11,8 @@ export const feedRouter = Router();
 
 const listQuery = paginationSchema.extend({
   postType: z.enum(['buy_sell', 'ask_help', 'offer_help', 'share_update']).optional(),
+  scope: z.enum(['society', 'lane', 'area', 'city']).optional(),
+  areaId: z.coerce.number().int().optional(),
 });
 
 const createPostSchema = z.object({

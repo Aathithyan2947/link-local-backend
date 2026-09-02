@@ -418,7 +418,18 @@ export async function getGroup(id: number, viewerId?: number) {
   const group = await prisma.interestGroup.findUnique({
     where: { id },
     include: {
-      creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+      creator: {
+        select: {
+          id: true,
+          profile: {
+            select: {
+              name: true,
+              photoUrl: true,
+              address: { select: { area: { select: { areaName: true } } } },
+            },
+          },
+        },
+      },
       posts: {
         orderBy: { id: 'desc' },
         take: 10,
@@ -443,23 +454,110 @@ export async function getGroup(id: number, viewerId?: number) {
     _count: { rating: true },
   });
 
-  let myMembership: { status: string; paymentStatus: string | null } | null = null;
+  let myMembership: { status: string; paymentStatus: string | null; muted: boolean } | null = null;
   let isCreator = false;
+  let clearedAt: Date | null = null;
   if (viewerId) {
     isCreator = group.creatorId === viewerId;
     const m = await prisma.interestGroupMember.findFirst({ where: { groupId: id, userId: viewerId } });
-    if (m) myMembership = { status: m.status, paymentStatus: m.paymentStatus };
+    if (m) {
+      myMembership = { status: m.status, paymentStatus: m.paymentStatus, muted: m.muted };
+      clearedAt = m.chatClearedAt;
+    }
   }
 
   const { posts, ...rest } = group;
+  // Whoever created the group anchors it to a place; that is what the discussions header names.
+  const area = group.creator.profile?.address?.area?.areaName ?? null;
+  const discussions = posts
+    .map((gp) => gp.post)
+    // "Clear chat" hides history for the member who asked, not for the group.
+    .filter((post) => clearedAt === null || post.createdAt > clearedAt);
+
   return {
     ...rest,
-    discussions: posts.map((gp) => gp.post),
+    area,
+    discussions,
     ratingAvg: agg._avg.rating != null ? Math.round(agg._avg.rating * 10) / 10 : null,
     ratingCount: agg._count.rating,
     myMembership,
     isCreator,
   };
+}
+
+/** The group's discussions, optionally narrowed to posts by members living in one area —
+ *  the same per-section area scoping Home applies to its own Community Discussions. Kept
+ *  separate from `getGroup` so changing the area refetches a list, not the whole profile. */
+export async function listGroupDiscussions(groupId: number, viewerId: number, areaId?: number) {
+  const member = await prisma.interestGroupMember.findFirst({
+    where: { groupId, userId: viewerId },
+    select: { chatClearedAt: true },
+  });
+  const clearedAt = member?.chatClearedAt ?? null;
+
+  const ctx = await resolveUserScopeContext(viewerId);
+  const safeAreaId = await sanitizeAreaOverride(areaId, ctx.cityId);
+
+  const rows = await prisma.interestGroupPost.findMany({
+    where: {
+      groupId,
+      ...(safeAreaId ? { post: { user: { profile: { address: { areaId: safeAreaId } } } } } : {}),
+    },
+    orderBy: { id: 'desc' },
+    take: 10,
+    include: {
+      post: {
+        include: {
+          user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+          media: { take: 1, orderBy: { sortOrder: 'asc' } },
+          _count: { select: { likes: true, comments: true } },
+        },
+      },
+    },
+  });
+
+  return rows
+    .map((gp) => gp.post)
+    .filter((post) => clearedAt === null || post.createdAt > clearedAt);
+}
+
+/** Joined members of a group, for the Members action on the group profile. */
+export async function listGroupMembers(groupId: number) {
+  const rows = await prisma.interestGroupMember.findMany({
+    where: { groupId, status: 'joined' },
+    orderBy: { joinedAt: 'asc' },
+    include: { user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } } },
+  });
+  const group = await prisma.interestGroup.findUnique({
+    where: { id: groupId },
+    select: { creatorId: true },
+  });
+  return rows.map((m) => ({
+    userId: m.user.id,
+    name: m.user.profile?.name ?? 'Member',
+    photoUrl: m.user.profile?.photoUrl ?? null,
+    isCreator: m.user.id === group?.creatorId,
+    joinedAt: m.joinedAt,
+  }));
+}
+
+/** Per-member notification mute for one group. */
+export async function setGroupMuted(groupId: number, userId: number, muted: boolean) {
+  const member = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
+  if (!member) throw ApiError.forbidden('Join the group first');
+  await prisma.interestGroupMember.update({ where: { id: member.id }, data: { muted } });
+  return { muted };
+}
+
+/** Hides the group's existing discussions from this member only. */
+export async function clearGroupChat(groupId: number, userId: number) {
+  const member = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
+  if (!member) throw ApiError.forbidden('Join the group first');
+  await prisma.interestGroupMember.update({
+    where: { id: member.id },
+    data: { chatClearedAt: new Date() },
+  });
+  return { cleared: true };
 }
 
 // ── Groups lifecycle (create / join / leave / pay / rate / post) ──
@@ -536,14 +634,20 @@ export async function joinGroup(groupId: number, userId: number) {
     : await prisma.interestGroupMember.create({ data: { groupId, userId, status, paymentStatus } });
 
   if (status === 'joined') await bumpUserStats(userId, { groupsPartOf: 1 });
-  await emitNotification({
-    userId: group.creatorId,
-    title: 'New member',
-    body: `Someone joined "${group.title}"`,
-    type: 'group_invite',
-    entityType: 'group',
-    entityId: groupId,
+  const creatorMembership = await prisma.interestGroupMember.findFirst({
+    where: { groupId, userId: group.creatorId },
+    select: { muted: true },
   });
+  if (!creatorMembership?.muted) {
+    await emitNotification({
+      userId: group.creatorId,
+      title: 'New member',
+      body: `Someone joined "${group.title}"`,
+      type: 'group_invite',
+      entityType: 'group',
+      entityId: groupId,
+    });
+  }
   return member;
 }
 

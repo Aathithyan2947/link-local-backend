@@ -18,6 +18,7 @@ const ratingSchema = z.object({
   review: z.string().max(1000).optional(),
 });
 const paySchema = z.object({ couponCode: z.string().optional() });
+const mutedSchema = z.object({ muted: z.boolean() });
 const deletionSchema = z.object({ reason: z.string().max(1000).optional() });
 
 const createEventSchema = z.object({
@@ -199,6 +200,35 @@ groupsRouter.post(
   validate({ body: ratingSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.rateGroup(Number(req.params.id), req.auth!.sub, req.body), 201),
+  ),
+);
+groupsRouter.get(
+  '/:id/discussions',
+  authenticate('user'),
+  validate({ query: z.object({ areaId: z.coerce.number().int().optional() }) }),
+  asyncHandler(async (req, res) => {
+    const q = getValidatedQuery<{ areaId?: number }>(req);
+    ok(res, await service.listGroupDiscussions(Number(req.params.id), req.auth!.sub, q.areaId));
+  }),
+);
+groupsRouter.get(
+  '/:id/members',
+  authenticate('user'),
+  asyncHandler(async (req, res) => ok(res, await service.listGroupMembers(Number(req.params.id)))),
+);
+groupsRouter.post(
+  '/:id/mute',
+  authenticate('user'),
+  validate({ body: mutedSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.setGroupMuted(Number(req.params.id), req.auth!.sub, req.body.muted)),
+  ),
+);
+groupsRouter.post(
+  '/:id/clear-chat',
+  authenticate('user'),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.clearGroupChat(Number(req.params.id), req.auth!.sub)),
   ),
 );
 groupsRouter.post(
