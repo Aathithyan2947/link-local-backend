@@ -25,6 +25,11 @@ model City {
   state     String?
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at")
+  // Service area: a circle an address must fall inside to belong to this city.
+  // All three unset means no area yet, and callers fall back to matching by name.
+  centerLat Decimal? @map("center_lat") @db.Decimal(10, 7)
+  centerLng Decimal? @map("center_lng") @db.Decimal(10, 7)
+  radiusKm  Decimal? @map("radius_km") @db.Decimal(6, 2)
 
   areas             Area[]
   referralPoints    CityReferralPoint[]
@@ -1193,6 +1198,10 @@ model Event {
   durationMinutes     Int?      @map("duration_minutes")
   mode                String // online | offline
   location            String?
+  // Map position of [location] when it was picked from place search; null when typed.
+  latitude            Decimal?  @db.Decimal(10, 7)
+  longitude           Decimal?  @db.Decimal(10, 7)
+  googlePlaceId       String?   @map("google_place_id")
   onlineLink          String?   @map("online_link")
   visibilityCircleId  Int?      @map("visibility_circle_id")
   isPrivate           Boolean   @default(false) @map("is_private")

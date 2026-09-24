@@ -31,6 +31,10 @@ const createEventSchema = z.object({
   mode: z.enum(['online', 'offline']),
   location: z.string().optional(),
   onlineLink: z.string().optional(),
+  // Set when the location was picked from place search; null clears them (typed location).
+  latitude: z.number().min(-90).max(90).nullable().optional(),
+  longitude: z.number().min(-180).max(180).nullable().optional(),
+  googlePlaceId: z.string().max(300).nullable().optional(),
   isPrivate: z.boolean().optional(),
   isPaid: z.boolean().optional(),
   price: z.coerce.number().nonnegative().optional(),

@@ -6,6 +6,10 @@ export const citySchema = z.object({
   name: z.string().min(1),
   state: z.string().optional(),
   isActive: z.boolean().optional(),
+  // Service area (centre + radius). Addresses must fall inside it; see lib/cityArea.
+  centerLat: z.number().min(-90).max(90).optional(),
+  centerLng: z.number().min(-180).max(180).optional(),
+  radiusKm: z.number().positive().max(200).optional(),
 });
 
 export const areaSchema = z.object({

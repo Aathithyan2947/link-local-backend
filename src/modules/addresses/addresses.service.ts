@@ -1,6 +1,9 @@
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
+import { isInCityArea } from '../../lib/cityArea.js';
+import { LOCALITY_LIMITS, localityText, pincode as pincodeRule } from '../../lib/localityText.js';
+import { z } from 'zod';
 import type {
   CreateAddressInput,
   CreateMasterInput,
@@ -33,6 +36,20 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
   const profile = await prisma.profile.findUnique({ where: { userId } });
   if (!profile) throw ApiError.notFound('Profile not found');
 
+  // The chosen city is authoritative: a pin outside its service area is rejected
+  // here too, not only in the app, so no address is filed under the wrong city.
+  const city = await prisma.city.findUnique({ where: { id: input.cityId } });
+  if (!city || !city.isActive) throw ApiError.badRequest('Link Local is not available in that city');
+  if (
+    input.latitude != null &&
+    input.longitude != null &&
+    isInCityArea(city, input.latitude, input.longitude) === false
+  ) {
+    throw ApiError.badRequest(
+      `This address is outside ${city.name}. Pick an address in ${city.name}, or change your city.`,
+    );
+  }
+
   const areaId = await resolveAreaId(input);
 
   // The user's private address keeps their building/flat + exact pin; it is usable
@@ -57,12 +74,26 @@ export async function createAddressForUser(userId: number, input: CreateAddressI
 
   await prisma.profile.update({ where: { id: profile.id }, data: { addressId: address.id } });
 
-  // Ensure a city membership row exists (primary city).
-  await prisma.userCityMembership.upsert({
-    where: { userId_cityId: { userId, cityId: input.cityId } },
-    update: {},
-    create: { userId, cityId: input.cityId, isPrimary: true },
-  });
+  // The address's city is the primary one — and the only one: moving city must not
+  // leave the previous city marked primary alongside it.
+  await prisma.$transaction([
+    prisma.userCityMembership.updateMany({
+      where: { userId, cityId: { not: input.cityId }, isPrimary: true },
+      data: { isPrimary: false },
+    }),
+    prisma.userCityMembership.upsert({
+      where: { userId_cityId: { userId, cityId: input.cityId } },
+      update: { isPrimary: true },
+      create: { userId, cityId: input.cityId, isPrimary: true },
+    }),
+  ]);
+
+  // Verification belongs to an address: proofs approved for the previous one say nothing
+  // about this one, so a changed address starts unverified until a new proof is approved.
+  // (The old address and its proofs are kept for the record.)
+  if (profile.addressId != null) {
+    await prisma.user.update({ where: { id: userId }, data: { isVerified: false } });
+  }
 
   // Feed the locality (building/complex name + lane/area, never the flat) into the Address
   // Master — reuse an approved match or queue a new pending one. Never blocks the user.
@@ -169,13 +200,14 @@ export async function deleteCity(cityId: number) {
  * Directory autocomplete powering the app's address search. Suggestions come ONLY from the
  * approved Address Master (deduped localities/lanes) — never from per-user building names.
  */
-export async function searchDirectory(q: string) {
+export async function searchDirectory(q: string, cityId?: number) {
   const term = q.trim();
   if (term.length < 2) return { localities: [] };
 
   const rows = await prisma.addressMaster.findMany({
     where: {
       status: 'approved',
+      ...(cityId != null && { cityId }),
       OR: [
         { complex: { contains: term, mode: 'insensitive' } },
         { lane1: { contains: term, mode: 'insensitive' } },
@@ -625,6 +657,16 @@ export async function saveCityAddressFields(cityId: number, fields: AddressField
  * master locality. The building/complex-name column is intentionally ignored — the master
  * never stores buildings. Rows are deduped by (city, lane1, lane2, area).
  */
+/** One spreadsheet row's locality fields: each optional, but held to the shared rules. */
+const importRowSchema = z.object({
+  complex: localityText('Complex / Building name', LOCALITY_LIMITS.complex).optional(),
+  lane1: localityText('Lane 1', LOCALITY_LIMITS.text).optional(),
+  lane2: localityText('Lane 2', LOCALITY_LIMITS.text).optional(),
+  area: localityText('Area', LOCALITY_LIMITS.text).optional(),
+  suburb: localityText('Suburb', LOCALITY_LIMITS.text).optional(),
+  pincode: pincodeRule().optional(),
+});
+
 export async function importAddresses(
   rows: Array<Record<string, unknown>>,
 ): Promise<{ created: number; skipped: number; errors: string[] }> {
@@ -647,19 +689,33 @@ export async function importAddresses(
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const complex = pick(r, ['complex name', 'complex', 'apartment', 'building']);
-    const lane1 = pick(r, ['lane 1', 'lane1']);
-    const lane2 = pick(r, ['lane 2', 'lane2', 'locality']);
-    const area = pick(r, ['area']);
-    const suburb = pick(r, ['suburb']);
     const cityName = pick(r, ['city']);
-    const pincode = pick(r, ['pincode', 'pin code', 'zip']);
+    const raw = {
+      complex: pick(r, ['complex name', 'complex', 'apartment', 'building']),
+      lane1: pick(r, ['lane 1', 'lane1']),
+      lane2: pick(r, ['lane 2', 'lane2', 'locality']),
+      area: pick(r, ['area']),
+      suburb: pick(r, ['suburb']),
+      pincode: pick(r, ['pincode', 'pin code', 'zip']),
+    };
 
     // Need a city and at least one locality field to form a master entry.
-    if (!cityName || (!lane1 && !lane2 && !area && !suburb)) {
+    if (!cityName || (!raw.lane1 && !raw.lane2 && !raw.area && !raw.suburb)) {
       skipped++;
       continue;
     }
+
+    // Same length/character rules as the Add Locality form; a bad row is skipped, with the
+    // reason reported, rather than entering the directory.
+    const checked = importRowSchema.safeParse(
+      Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== '')),
+    );
+    if (!checked.success) {
+      skipped++;
+      if (errors.length < 5) errors.push(`Row ${i + 2}: ${checked.error.issues[0]?.message ?? 'invalid value'}`);
+      continue;
+    }
+    const { complex = '', lane1 = '', lane2 = '', area = '', suburb = '', pincode = '' } = checked.data;
 
     try {
       let cityId = cityCache.get(cityName.toLowerCase());

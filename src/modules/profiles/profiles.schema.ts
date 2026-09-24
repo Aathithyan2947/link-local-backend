@@ -34,6 +34,24 @@ export const professionSchema = z.object({
   companyOrDetail: z.string().optional(),
 });
 
+/**
+ * The profile's "About" block edited as one unit: About Me plus the whole education and
+ * profession sets, replaced together so a partial save can't leave a mix of old and new.
+ */
+export const aboutSchema = z.object({
+  aboutMe: z.string().max(2000),
+  educations: z
+    .array(
+      z.object({
+        degree: z.string().max(200).optional(),
+        schoolName: z.string().max(200).optional(),
+        collegeName: z.string().max(200).optional(),
+      }),
+    )
+    .max(10),
+  professions: z.array(professionSchema).max(10),
+});
+
 /** Replace-all form of [professionSchema], for callers that own the whole set (the SP wizard). */
 export const professionsSchema = z.object({
   professions: z.array(professionSchema),

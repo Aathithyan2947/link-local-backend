@@ -32,10 +32,11 @@ const sheetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize
 addressesRouter.get(
   '/directory',
   authenticate('user'),
-  validate({ query: z.object({ q: z.string().default('') }) }),
+  // cityId is optional only so app builds from before city-scoped search keep working.
+  validate({ query: z.object({ q: z.string().default(''), cityId: z.coerce.number().int().positive().optional() }) }),
   asyncHandler(async (req, res) => {
-    const { q } = getValidatedQuery<{ q: string }>(req);
-    ok(res, await service.searchDirectory(q));
+    const { q, cityId } = getValidatedQuery<{ q: string; cityId?: number }>(req);
+    ok(res, await service.searchDirectory(q, cityId));
   }),
 );
 

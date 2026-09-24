@@ -5,6 +5,7 @@ import { addressesRouter } from './modules/addresses/addresses.routes.js';
 import { geoRouter } from './modules/geo/geo.routes.js';
 import { profilesRouter } from './modules/profiles/profiles.routes.js';
 import { homeRouter } from './modules/home/home.routes.js';
+import { membersRouter } from './modules/members/members.routes.js';
 import { feedRouter } from './modules/feed/feed.routes.js';
 import {
   eventsRouter,
@@ -29,6 +30,7 @@ router.use('/addresses', addressesRouter);
 router.use('/geo', geoRouter);
 router.use('/profiles', profilesRouter);
 router.use('/home', homeRouter);
+router.use('/members', membersRouter);
 router.use('/posts', feedRouter);
 router.use('/events', eventsRouter);
 router.use('/groups', groupsRouter);

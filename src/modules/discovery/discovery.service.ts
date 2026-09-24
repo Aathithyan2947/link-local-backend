@@ -1,4 +1,6 @@
 import { prisma } from '../../lib/prisma.js';
+import { providerLocationInclude, viewerCoords, withPublicLocation } from '../../lib/providerLocation.js';
+import { hasEventStarted, withViewerEventState } from '../../lib/eventTiming.js';
 import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
@@ -45,6 +47,9 @@ export interface CreateEventInput {
   mode: 'online' | 'offline';
   location?: string;
   onlineLink?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  googlePlaceId?: string | null;
   isPrivate?: boolean;
   isPaid?: boolean;
   price?: number;
@@ -111,13 +116,31 @@ export async function listEvents(
     }),
     prisma.event.count({ where }),
   ]);
-  const ratings = await eventRatingMap(items.map((e) => e.id));
-  const enriched = items.map((e) => ({
+  const [ratings, withState] = await Promise.all([
+    eventRatingMap(items.map((e) => e.id)),
+    withViewerEventState(items, userId),
+  ]);
+  const enriched = withState.map((e) => ({
     ...e,
     ratingAvg: ratings.get(e.id)?.avg ?? null,
     ratingCount: ratings.get(e.id)?.count ?? 0,
   }));
   return { items: enriched, meta: buildMeta(params.page, params.pageSize, total) };
+}
+
+/**
+ * Who may review an event: someone who joined it, once it has started — never its host.
+ * Returns null when allowed, else the reason (what the API reports).
+ */
+function eventReviewBlocker(
+  event: { creatorId: number; date: Date; startTime: Date | null },
+  userId: number,
+  attendance: { status: string } | null,
+): string | null {
+  if (event.creatorId === userId) return "You can't review your own event";
+  if (attendance?.status !== 'joined') return 'Only people who joined this event can review it';
+  if (!hasEventStarted(event)) return 'You can review this event after it starts';
+  return null;
 }
 
 export async function getEvent(id: number, viewerId?: number) {
@@ -164,11 +187,17 @@ export async function getEvent(id: number, viewerId?: number) {
     if (a) myAttendance = { status: a.status, paymentStatus: a.paymentStatus };
   }
 
+  const isHost = viewerId != null && event.creatorId === viewerId;
   return {
     ...event,
     ratingAvg: agg._avg.rating != null ? Math.round(agg._avg.rating * 10) / 10 : null,
     ratingCount: agg._count.rating,
     myAttendance,
+    // Decided here so the app never needs its own copy of the review rules.
+    isHost,
+    hasStarted: hasEventStarted(event),
+    canReview: viewerId != null && eventReviewBlocker(event, viewerId, myAttendance) === null,
+    canJoin: !isHost && !hasEventStarted(event) && myAttendance?.status !== 'joined',
   };
 }
 
@@ -186,6 +215,9 @@ export async function createEvent(userId: number, data: CreateEventInput) {
       durationMinutes: data.durationMinutes,
       mode: data.mode,
       location: data.location,
+      latitude: data.latitude,
+      longitude: data.longitude,
+      googlePlaceId: data.googlePlaceId,
       onlineLink: data.onlineLink,
       isPrivate: data.isPrivate ?? false,
       isPaid: data.isPaid ?? false,
@@ -221,6 +253,9 @@ export async function updateEvent(eventId: number, userId: number, data: Partial
       durationMinutes: data.durationMinutes,
       mode: data.mode,
       location: data.location,
+      latitude: data.latitude,
+      longitude: data.longitude,
+      googlePlaceId: data.googlePlaceId,
       onlineLink: data.onlineLink,
       isPrivate: data.isPrivate,
       isPaid: data.isPaid,
@@ -247,6 +282,7 @@ export async function joinEvent(eventId: number, userId: number) {
 
   const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
   if (existing?.status === 'joined') return existing;
+  if (hasEventStarted(event)) throw ApiError.badRequest('This event has already started');
 
   if (event.maxAttendees && event._count.attendees >= event.maxAttendees) {
     throw ApiError.badRequest('This event is full');
@@ -273,6 +309,8 @@ export async function joinEvent(eventId: number, userId: number) {
 export async function withdrawEvent(eventId: number, userId: number) {
   const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
   if (!existing) throw ApiError.badRequest('You have not joined this event');
+  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { date: true, startTime: true } });
+  if (event && hasEventStarted(event)) throw ApiError.badRequest("You can't withdraw once the event has started");
   return prisma.eventAttendee.update({ where: { id: existing.id }, data: { status: 'withdrawn' } });
 }
 
@@ -321,8 +359,14 @@ export async function rateEvent(
   userId: number,
   data: { rating: number; review?: string },
 ) {
-  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { id: true } });
+  const event = await prisma.event.findUnique({
+    where: { id: eventId },
+    select: { id: true, creatorId: true, date: true, startTime: true },
+  });
   if (!event) throw ApiError.notFound('Event not found');
+  const attendance = await prisma.eventAttendee.findFirst({ where: { eventId, userId }, select: { status: true } });
+  const blocker = eventReviewBlocker(event, userId, attendance);
+  if (blocker) throw event.creatorId === userId ? ApiError.forbidden(blocker) : ApiError.badRequest(blocker);
 
   const existing = await prisma.eventRating.findFirst({ where: { eventId, userId } });
   if (existing) {
@@ -359,9 +403,14 @@ export async function myEvents(userId: number) {
     }),
   ]);
   const ratings = await eventRatingMap([...hosted, ...attending].map((e) => e.id));
-  const enrich = (items: typeof hosted) =>
-    items.map((e) => ({ ...e, ratingAvg: ratings.get(e.id)?.avg ?? null, ratingCount: ratings.get(e.id)?.count ?? 0 }));
-  return { hosted: enrich(hosted), attending: enrich(attending) };
+  const enrich = async (items: typeof hosted) =>
+    (await withViewerEventState(items, userId)).map((e) => ({
+      ...e,
+      ratingAvg: ratings.get(e.id)?.avg ?? null,
+      ratingCount: ratings.get(e.id)?.count ?? 0,
+    }));
+  const [hostedOut, attendingOut] = await Promise.all([enrich(hosted), enrich(attending)]);
+  return { hosted: hostedOut, attending: attendingOut };
 }
 
 // ── Interest Groups ──────────────────────────────────────────
@@ -704,8 +753,9 @@ export async function rateGroup(
   userId: number,
   data: { rating: number; review?: string },
 ) {
-  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { id: true } });
+  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { id: true, creatorId: true } });
   if (!group) throw ApiError.notFound('Group not found');
+  if (group.creatorId === userId) throw ApiError.forbidden("You can't review your own group");
   const existing = await prisma.interestGroupRating.findFirst({ where: { groupId, userId } });
   if (existing) {
     return prisma.interestGroupRating.update({
@@ -785,14 +835,15 @@ export async function listServiceProviders(
       include: {
         serviceTypes: { include: { subcategory: true } },
         _count: { select: { ratings: true } },
+        ...providerLocationInclude,
       },
       ...toPrismaPagination(params),
     }),
     prisma.profile.count({ where }),
   ]);
-  const ratings = await spRatingMap(items.map((p) => p.id));
+  const [ratings, viewer] = await Promise.all([spRatingMap(items.map((p) => p.id)), viewerCoords(userId)]);
   const enriched = items.map((p) => ({
-    ...p,
+    ...withPublicLocation(p, viewer),
     ratingAvg: ratings.get(p.id)?.avg ?? null,
     ratingCount: ratings.get(p.id)?.count ?? p._count.ratings,
   }));
@@ -843,6 +894,19 @@ export async function getServiceProvider(id: number, callerId?: number) {
     creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
     _count: { select: { attendees: true } },
   };
+  // A provider's profile shows only the events they created — joining someone else's
+  // event must not put it on their page. A resident's (own) profile keeps both.
+  const isProvider = sp.user.userType === 'service_provider';
+  // Private events appear on a profile only for the host and the people they invited.
+  const visibleToCaller =
+    callerId === userId
+      ? {}
+      : {
+          OR: [
+            { isPrivate: false },
+            ...(callerId != null ? [{ invitedUsers: { some: { invitedUserId: callerId } } }] : []),
+          ],
+        };
 
   const [ragg, hosted, attending, posts, adminGroups, memberGroups, customFields, privacy] = await Promise.all([
     prisma.serviceProviderRating.aggregate({
@@ -851,17 +915,19 @@ export async function getServiceProvider(id: number, callerId?: number) {
       _count: { rating: true },
     }),
     prisma.event.findMany({
-      where: { creatorId: userId, isActive: true },
+      where: { creatorId: userId, isActive: true, ...visibleToCaller },
       orderBy: { date: 'desc' },
       take: 10,
       include: eventInclude,
     }),
-    prisma.event.findMany({
-      where: { isActive: true, attendees: { some: { userId, status: 'joined' } } },
-      orderBy: { date: 'desc' },
-      take: 10,
-      include: eventInclude,
-    }),
+    isProvider
+      ? Promise.resolve([])
+      : prisma.event.findMany({
+          where: { isActive: true, attendees: { some: { userId, status: 'joined' } }, ...visibleToCaller },
+          orderBy: { date: 'desc' },
+          take: 10,
+          include: eventInclude,
+        }),
     prisma.post.findMany({
       where: { userId, isActive: true },
       orderBy: { createdAt: 'desc' },
@@ -890,8 +956,11 @@ export async function getServiceProvider(id: number, callerId?: number) {
     ...hosted.map((e) => ({ ...e, relation: 'hosting' as const })),
     ...attending.filter((e) => !hostedIds.has(e.id)).map((e) => ({ ...e, relation: 'attending' as const })),
   ];
-  const eventRatings = await eventRatingMap(eventRows.map((e) => e.id));
-  const events = eventRows.map((e) => ({ ...e, ratingAvg: eventRatings.get(e.id)?.avg ?? null }));
+  const [eventRatings, eventRowsWithState] = await Promise.all([
+    eventRatingMap(eventRows.map((e) => e.id)),
+    callerId != null ? withViewerEventState(eventRows, callerId) : eventRows,
+  ]);
+  const events = eventRowsWithState.map((e) => ({ ...e, ratingAvg: eventRatings.get(e.id)?.avg ?? null }));
 
   // Tag + dedupe interest groups (admin wins over member).
   const adminGroupIds = new Set(adminGroups.map((a) => a.groupId));

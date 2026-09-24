@@ -28,6 +28,7 @@ import {
   professionsSchema,
   ratesSchema,
   reportProfileSchema,
+  aboutSchema,
   serviceTypesSchema,
   updateEmailSchema,
   updatePhoneSchema,
@@ -150,6 +151,8 @@ profilesRouter.delete('/me/education/:id', auth, asyncHandler(async (req, res) =
 // Profession
 profilesRouter.post('/me/professions', auth, validate({ body: professionSchema }), asyncHandler(async (req, res) => ok(res, await service.addProfession(req.auth!.sub, req.body), 201)));
 // Replace-all, for callers that own the whole set (the SP wizard) — see setProfessions.
+// About Me + education + profession saved together from the profile's single About editor.
+profilesRouter.put('/me/about', auth, validate({ body: aboutSchema }), asyncHandler(async (req, res) => ok(res, await service.setAbout(req.auth!.sub, req.body))));
 profilesRouter.put('/me/professions', auth, validate({ body: professionsSchema }), asyncHandler(async (req, res) => ok(res, await service.setProfessions(req.auth!.sub, req.body))));
 profilesRouter.delete('/me/professions/:id', auth, asyncHandler(async (req, res) => ok(res, await service.deleteChild(req.auth!.sub, 'profileProfession', Number(req.params.id)))));
 
@@ -194,6 +197,8 @@ profilesRouter.delete('/me/contacts/:id', auth, asyncHandler(async (req, res) =>
 profilesRouter.post('/me/service-types', auth, validate({ body: serviceTypesSchema }), asyncHandler(async (req, res) => ok(res, await service.setServiceTypes(req.auth!.sub, req.body))));
 
 // Dynamic subcategory fields (SP) — incl. file uploads like menu/rate cards.
+// Just the SP's menu/booking flags — without loading the whole profile, which /me does.
+profilesRouter.get('/me/features', auth, asyncHandler(async (req, res) => ok(res, await service.getMyProviderFeatures(req.auth!.sub))));
 profilesRouter.get('/me/custom-fields', auth, asyncHandler(async (req, res) => ok(res, await service.getMyCustomFields(req.auth!.sub))));
 profilesRouter.put('/me/custom-fields', auth, validate({ body: customFieldsSchema }), asyncHandler(async (req, res) => ok(res, await service.saveCustomFields(req.auth!.sub, req.body.values))));
 profilesRouter.post(

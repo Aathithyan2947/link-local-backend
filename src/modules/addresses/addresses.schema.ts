@@ -1,24 +1,27 @@
 import { z } from 'zod';
 import { paginationSchema } from '../../utils/pagination.js';
+import { LOCALITY_LIMITS, localityText, pincode } from '../../lib/localityText.js';
 
+// The member's own address. Its locality parts are optional (the city's form decides which
+// appear) but held to the same rules as the Address Master, which they feed.
 export const createAddressSchema = z.object({
   cityId: z.number().int(),
   areaId: z.number().int().optional(),
-  areaName: z.string().optional(),
-  pincode: z.string().optional(),
-  suburb: z.string().optional(),
-  flatWing: z.string().optional(),
-  apartment: z.string().optional(),
-  lane1: z.string().optional(),
-  lane2: z.string().optional(),
-  fullAddress: z.string().min(1),
+  areaName: localityText('Area', LOCALITY_LIMITS.text).optional(),
+  pincode: pincode().optional(),
+  suburb: localityText('Suburb', LOCALITY_LIMITS.text).optional(),
+  flatWing: z.string().trim().max(40, 'Flat / wing must be at most 40 characters').optional(),
+  apartment: localityText('Building / complex name', LOCALITY_LIMITS.complex).optional(),
+  lane1: localityText('Lane 1', LOCALITY_LIMITS.text).optional(),
+  lane2: localityText('Lane 2', LOCALITY_LIMITS.text).optional(),
+  fullAddress: z.string().min(1).max(600),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
   // How the pin was captured — see Address.accuracyM in the Prisma schema for why
   // this is worth storing. Null accuracy is meaningful: a hand-placed pin is a
   // placement, not a measurement.
   accuracyM: z.number().nonnegative().optional(),
-  locationSource: z.enum(['gps', 'cached', 'manual_pin', 'master', 'mocked']).optional(),
+  locationSource: z.enum(['gps', 'cached', 'manual_pin', 'master', 'place', 'mocked']).optional(),
   googlePlaceId: z.string().optional(),
 });
 
@@ -45,16 +48,15 @@ const latitude = z.number().min(-90).max(90);
 const longitude = z.number().min(-180).max(180);
 
 // Every locality field is mandatory in the admin "Add locality" form — a curated master
-// entry must be complete. (The per-city Form Format only governs the app's address form.)
-const requiredText = (label: string) => z.string().trim().min(1, `${label} is required`);
-
+// entry must be complete — and held to the shared locality rules (length, characters).
+// (The per-city Form Format only governs the app's address form.)
 const masterTextFields = {
-  complex: requiredText('Complex / Building name'),
-  lane1: requiredText('Lane 1'),
-  lane2: requiredText('Lane 2'),
-  area: requiredText('Area'),
-  suburb: requiredText('Suburb'),
-  pincode: requiredText('Pincode'),
+  complex: localityText('Complex / Building name', LOCALITY_LIMITS.complex),
+  lane1: localityText('Lane 1', LOCALITY_LIMITS.text),
+  lane2: localityText('Lane 2', LOCALITY_LIMITS.text),
+  area: localityText('Area', LOCALITY_LIMITS.text),
+  suburb: localityText('Suburb', LOCALITY_LIMITS.text),
+  pincode: pincode(),
 };
 
 export const createMasterSchema = z.object({

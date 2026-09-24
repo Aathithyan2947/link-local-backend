@@ -1,4 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
+import { providerLocationInclude, viewerCoords, withPublicLocation } from '../../lib/providerLocation.js';
+import { withViewerEventState } from '../../lib/eventTiming.js';
+import { visibleMembersWhere } from '../members/members.service.js';
 import { POINTS_PER_REFERRAL } from '../referrals/referrals.service.js';
 
 /** Resolves a user's active city id (primary membership, else profile address). */
@@ -169,14 +172,16 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
   const hasFilter = Object.keys(addressFilter).length > 0;
   const cityId = ctx.cityId;
 
-  const city = cityId
-    ? await prisma.city.findUnique({ where: { id: cityId }, select: { id: true, name: true, state: true } })
-    : null;
+  const [city, viewer] = await Promise.all([
+    cityId ? prisma.city.findUnique({ where: { id: cityId }, select: { id: true, name: true, state: true } }) : null,
+    viewerCoords(userId),
+  ]);
 
   const cityWhere = hasFilter ? { creator: { profile: { address: addressFilter } } } : {};
   const postCityWhere = hasFilter ? { user: { profile: { address: addressFilter } } } : {};
   const spCityWhere = hasFilter ? { address: addressFilter } : {};
-  const memberWhere = hasFilter ? { address: addressFilter } : {};
+  // Same rule as the Members list, so the tile's number matches the list behind it.
+  const memberWhere = visibleMembersWhere(userId, ctx, addressFilter);
 
   const [discussions, groups, workshops, serviceProviders, groupCount, workshopCount, spCount, memberCount, stats, scopeCounts, spServices] =
     await Promise.all([
@@ -213,6 +218,7 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
         include: {
           serviceTypes: { include: { subcategory: true }, take: 4 },
           _count: { select: { ratings: true } },
+          ...providerLocationInclude,
         },
       }),
       prisma.interestGroup.count({ where: { isActive: true, ...cityWhere } }),
@@ -236,8 +242,12 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
     },
     discussions,
     groups: { total: groupCount, items: groups },
-    workshops: { total: workshopCount, items: workshops },
-    serviceProviders: { total: spCount, items: serviceProviders, services: spServices },
+    workshops: { total: workshopCount, items: await withViewerEventState(workshops, userId) },
+    serviceProviders: {
+      total: spCount,
+      items: serviceProviders.map((p) => withPublicLocation(p, viewer)),
+      services: spServices,
+    },
     scopeCounts,
   };
 }

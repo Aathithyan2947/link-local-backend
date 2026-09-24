@@ -1,6 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
+import { cityArea } from '../../lib/cityArea.js';
 
 /**
  * Cache grid, in decimal places. 4 dp is roughly an 11 m cell: two pins that
@@ -218,4 +219,259 @@ export async function reverseGeocode(lat: number, lng: number): Promise<GeoAddre
     .catch((err) => logger.warn({ err }, 'Could not cache the geocode result'));
 
   return withCoords(lat, lng, address);
+}
+
+// ── Place search (typed address → Google Places) ─────────────────────────────
+// Used when the curated Address Master has no match for what the member typed.
+// Places API (New): https://developers.google.com/maps/documentation/places/web-service/op-overview
+
+const PLACES_BASE = 'https://places.googleapis.com/v1';
+
+/** Bias radius for a city with no service area set. A bias, not a fence. */
+const BIAS_RADIUS_M = 30_000;
+
+/** Place details barely change; a day keeps repeat picks free without holding them long. */
+const PLACE_CACHE_TTL_MS = 24 * 3_600_000;
+const PLACE_CACHE_MAX = 2_000;
+
+/**
+ * Types whose coordinates mark a specific building or business. Anything else
+ * (a locality, a road) is a centroid, and the app asks the member to check the pin.
+ */
+const PRECISE_TYPES = new Set([
+  'premise',
+  'subpremise',
+  'street_address',
+  'establishment',
+  'point_of_interest',
+]);
+
+/** Types whose suggestion text is a building or business name, not a street line. */
+const NAMED_TYPES = new Set(['premise', 'subpremise', 'establishment', 'point_of_interest']);
+
+export interface PlaceSuggestion {
+  placeId: string;
+  primaryText: string;
+  secondaryText: string | null;
+}
+
+export interface PlaceAddress extends GeoAddress {
+  /** True when the coordinates mark the place itself rather than an area's centre. */
+  isPrecise: boolean;
+  /** True when the place is a named building or business, so its name can fill the building field. */
+  isNamed: boolean;
+}
+
+interface PlacesComponent {
+  longText?: string;
+  types?: string[];
+}
+
+interface PlacesDetails {
+  id?: string;
+  formattedAddress?: string;
+  location?: { latitude: number; longitude: number };
+  addressComponents?: PlacesComponent[];
+  types?: string[];
+}
+
+interface PlacesAutocomplete {
+  suggestions?: {
+    placePrediction?: {
+      placeId: string;
+      text?: { text: string };
+      structuredFormat?: { mainText?: { text: string }; secondaryText?: { text: string } };
+    };
+  }[];
+}
+
+/**
+ * Autocomplete and details calls are not cache rows, so the geocode counter
+ * above cannot see them. In-memory is enough for a guard rail: a restart only
+ * ever resets it towards allowing calls, and the per-member limiter still holds.
+ */
+const placesUsage = { day: '', count: 0 };
+
+function takePlacesQuota(): boolean {
+  const today = new Date().toDateString();
+  if (placesUsage.day !== today) {
+    placesUsage.day = today;
+    placesUsage.count = 0;
+  }
+  if (placesUsage.count >= env.GEO_PLACES_DAILY_LIMIT) return false;
+  placesUsage.count += 1;
+  return true;
+}
+
+const placeCache = new Map<string, { value: PlaceAddress; expiresAt: number }>();
+const cityCentres = new Map<number, { latitude: number; longitude: number } | null>();
+
+/**
+ * Fallback for a city with no service area: the mean of its approved
+ * localities. Stable enough to compute once per process.
+ */
+async function localitiesCentre(cityId: number) {
+  if (cityCentres.has(cityId)) return cityCentres.get(cityId) ?? null;
+  const agg = await prisma.addressMaster.aggregate({
+    where: { cityId, status: 'approved', latitude: { not: null }, longitude: { not: null } },
+    _avg: { latitude: true, longitude: true },
+  });
+  const centre =
+    agg._avg.latitude != null && agg._avg.longitude != null
+      ? { latitude: Number(agg._avg.latitude), longitude: Number(agg._avg.longitude) }
+      : null;
+  cityCentres.set(cityId, centre);
+  return centre;
+}
+
+/** Shared preconditions for a billed Places call. Returns the key, or null to degrade. */
+function placesKey(): string | null {
+  const apiKey = env.GOOGLE_MAPS_SERVER_KEY;
+  if (!apiKey) {
+    logger.warn('GOOGLE_MAPS_SERVER_KEY is unset — place search is disabled');
+    return null;
+  }
+  if (!takePlacesQuota()) {
+    logger.warn({ limit: env.GEO_PLACES_DAILY_LIMIT }, 'Daily Places limit reached — place search paused');
+    return null;
+  }
+  return apiKey;
+}
+
+/**
+ * Suggests Google places for free text inside the member's chosen city: restricted
+ * to its service area, or, for a city without one, biased to its localities.
+ * The app still checks the picked place's exact position, since a suggestion
+ * can pass the restriction while the place itself sits just outside.
+ *
+ * Never throws: an empty list lets the app fall back to the curated results
+ * and the map pin, which is better than an error in the middle of sign-up.
+ */
+export async function autocompletePlaces(input: {
+  q: string;
+  sessionToken: string;
+  cityId: number;
+}): Promise<PlaceSuggestion[]> {
+  const city = await prisma.city.findUnique({ where: { id: input.cityId } });
+  if (!city) return [];
+  const area = cityArea(city);
+
+  const apiKey = placesKey();
+  if (!apiKey) return [];
+
+  let placement: Record<string, unknown> = {};
+  if (area) {
+    const circle = {
+      center: { latitude: area.latitude, longitude: area.longitude },
+      radius: Math.min(area.radiusKm * 1000, 50_000), // Google's maximum
+    };
+    placement = { locationRestriction: { circle } };
+  } else {
+    const centre = await localitiesCentre(input.cityId);
+    if (centre) placement = { locationBias: { circle: { center: centre, radius: BIAS_RADIUS_M } } };
+  }
+
+  try {
+    const response = await fetch(`${PLACES_BASE}/places:autocomplete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+      body: JSON.stringify({
+        input: input.q,
+        sessionToken: input.sessionToken,
+        includedRegionCodes: [env.GEO_REGION],
+        languageCode: 'en',
+        ...placement,
+      }),
+      signal: AbortSignal.timeout(GOOGLE_TIMEOUT_MS),
+    });
+    const body = (await response.json()) as PlacesAutocomplete & { error?: { message?: string } };
+    if (!response.ok) {
+      logger.error({ status: response.status, error: body.error?.message }, 'Google autocomplete rejected the request');
+      return [];
+    }
+
+    return (body.suggestions ?? []).flatMap(({ placePrediction: p }) =>
+      p
+        ? [
+            {
+              placeId: p.placeId,
+              primaryText: p.structuredFormat?.mainText?.text ?? p.text?.text ?? '',
+              secondaryText: p.structuredFormat?.secondaryText?.text ?? null,
+            },
+          ]
+        : [],
+    );
+  } catch (err) {
+    logger.error({ err }, 'Google autocomplete call failed');
+    return [];
+  }
+}
+
+/**
+ * Resolves a picked suggestion to coordinates plus the same address fields a
+ * map pin produces. Returns null when the place cannot be resolved; the app
+ * then asks the member to pin it on the map.
+ *
+ * Only Essentials-tier fields are requested (no displayName): the app already
+ * has the place's name from the suggestion it showed.
+ */
+export async function placeDetails(placeId: string, sessionToken?: string): Promise<PlaceAddress | null> {
+  const cached = placeCache.get(placeId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const apiKey = placesKey();
+  if (!apiKey) return null;
+
+  let place: PlacesDetails;
+  try {
+    const url = new URL(`${PLACES_BASE}/places/${encodeURIComponent(placeId)}`);
+    url.searchParams.set('languageCode', 'en');
+    url.searchParams.set('regionCode', env.GEO_REGION);
+    // Closes the autocomplete session so its keystrokes are billed as one.
+    if (sessionToken) url.searchParams.set('sessionToken', sessionToken);
+
+    const response = await fetch(url, {
+      headers: {
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'id,formattedAddress,location,addressComponents,types',
+      },
+      signal: AbortSignal.timeout(GOOGLE_TIMEOUT_MS),
+    });
+    const body = (await response.json()) as PlacesDetails & { error?: { message?: string } };
+    if (!response.ok) {
+      logger.error({ status: response.status, error: body.error?.message }, 'Google place details rejected the request');
+      return null;
+    }
+    place = body;
+  } catch (err) {
+    logger.error({ err }, 'Google place details call failed');
+    return null;
+  }
+
+  if (!place.location) return null;
+
+  // Same field mapping as a map pin, so both paths prefill the form identically.
+  const address = toAddress([
+    {
+      formatted_address: place.formattedAddress,
+      place_id: place.id ?? placeId,
+      address_components: (place.addressComponents ?? []).map((c) => ({
+        long_name: c.longText ?? '',
+        types: c.types ?? [],
+      })),
+    },
+  ]);
+
+  const value: PlaceAddress = {
+    ...withCoords(place.location.latitude, place.location.longitude, address),
+    isPrecise: (place.types ?? []).some((t) => PRECISE_TYPES.has(t)),
+    isNamed: (place.types ?? []).some((t) => NAMED_TYPES.has(t)),
+  };
+
+  if (placeCache.size >= PLACE_CACHE_MAX) {
+    // Oldest insertion first — Map preserves insertion order.
+    placeCache.delete(placeCache.keys().next().value!);
+  }
+  placeCache.set(placeId, { value, expiresAt: Date.now() + PLACE_CACHE_TTL_MS });
+  return value;
 }

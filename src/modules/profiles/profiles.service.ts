@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { withViewerEventState } from '../../lib/eventTiming.js';
 import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { dateOnly } from '../../lib/slots.js';
@@ -7,6 +8,7 @@ import { getCustomFieldsForProfile } from '../../lib/customFields.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import type { z } from 'zod';
 import type {
+  aboutSchema,
   availabilitySchema,
   blackoutSchema,
   contactSchema,
@@ -33,6 +35,12 @@ async function requireProfile(userId: number) {
   const profile = await prisma.profile.findUnique({ where: { userId } });
   if (!profile) throw ApiError.notFound('Profile not found');
   return profile;
+}
+
+/** The SP's menu / date-booking flags on their own — two small queries, not the full profile. */
+export async function getMyProviderFeatures(userId: number) {
+  const profile = await requireProfile(userId);
+  return resolveProviderFeatures(profile.id);
 }
 
 export async function getMyProfile(userId: number) {
@@ -184,10 +192,13 @@ export async function getPublicProfile(profileId: number, viewerUserId: number) 
   ]);
 
   const hostedIds = new Set(hosted.map((e) => e.id));
-  const events = [
-    ...hosted.map((e) => ({ ...e, relation: 'hosting' as const })),
-    ...attending.filter((e) => !hostedIds.has(e.id)).map((e) => ({ ...e, relation: 'attending' as const })),
-  ];
+  const events = await withViewerEventState(
+    [
+      ...hosted.map((e) => ({ ...e, relation: 'hosting' as const })),
+      ...attending.filter((e) => !hostedIds.has(e.id)).map((e) => ({ ...e, relation: 'attending' as const })),
+    ],
+    viewerUserId,
+  );
   const adminGroupIds = new Set(adminGroups.map((a) => a.groupId));
   const groups = [
     ...adminGroups.map((a) => ({ ...a.group, role: 'admin' as const })),
@@ -325,7 +336,19 @@ async function resolveCatalogId(
 // ── Education (curated degree/school/college catalogs + self-suggested "Other") ──
 export async function addEducation(userId: number, input: z.infer<typeof educationSchema>) {
   const profile = await requireProfile(userId);
+  const row = await prisma.profileEducation.create({
+    data: await educationRow(profile.id, input),
+    include: { educationMaster: true },
+  });
+  await recomputeCompletion(profile.id);
+  return row;
+}
 
+/**
+ * One profile_education row's data: resolves the degree/school/college against their
+ * catalogs (queueing new "Other" values as pending) and keeps the member's own wording.
+ */
+async function educationRow(profileId: number, input: z.infer<typeof educationSchema>) {
   const degree = input.degree?.trim();
   const educationMasterId =
     input.educationMasterId ??
@@ -348,25 +371,20 @@ export async function addEducation(userId: number, input: z.infer<typeof educati
   );
 
   // The member's chosen names + cities are denormalized on their profile row for display.
-  const row = await prisma.profileEducation.create({
-    data: {
-      profileId: profile.id,
-      educationMasterId,
-      schoolMasterId,
-      collegeMasterId,
-      degree,
-      schoolName: input.schoolName?.trim() || undefined,
-      schoolCity: input.schoolCity,
-      collegeName: input.collegeName?.trim() || undefined,
-      collegeCity: input.collegeCity,
-      university: input.university,
-      postGradCollege: input.postGradCollege,
-      postGradCity: input.postGradCity,
-    },
-    include: { educationMaster: true },
-  });
-  await recomputeCompletion(profile.id);
-  return row;
+  return {
+    profileId,
+    educationMasterId,
+    schoolMasterId,
+    collegeMasterId,
+    degree,
+    schoolName: input.schoolName?.trim() || undefined,
+    schoolCity: input.schoolCity,
+    collegeName: input.collegeName?.trim() || undefined,
+    collegeCity: input.collegeCity,
+    university: input.university,
+    postGradCollege: input.postGradCollege,
+    postGradCity: input.postGradCity,
+  };
 }
 
 // ── Profession (curated category + self-suggested "Other") ──────
@@ -394,6 +412,43 @@ export async function addProfession(userId: number, input: z.infer<typeof profes
   });
   await recomputeCompletion(profile.id);
   return row;
+}
+
+/**
+ * Saves the profile's About block as one unit: About Me, and the whole education and
+ * profession sets replaced in a single transaction. Catalog lookups (which may queue new
+ * "Other" entries) run first, since each is its own write. Empty entries are dropped.
+ */
+export async function setAbout(userId: number, input: z.infer<typeof aboutSchema>) {
+  const profile = await requireProfile(userId);
+
+  const educations = [];
+  for (const e of input.educations) {
+    if (![e.degree, e.schoolName, e.collegeName].some((v) => v?.trim())) continue;
+    educations.push(await educationRow(profile.id, e));
+  }
+  const professions = [];
+  for (const p of input.professions) {
+    if (!p.professionMasterId && !p.category?.trim()) continue;
+    professions.push({
+      profileId: profile.id,
+      professionMasterId: await resolveProfessionMasterId(p),
+      companyOrDetail: p.companyOrDetail?.trim() || null,
+    });
+  }
+
+  await prisma.$transaction([
+    prisma.profile.update({
+      where: { id: profile.id },
+      data: { aboutMe: input.aboutMe.trim() || null },
+    }),
+    prisma.profileEducation.deleteMany({ where: { profileId: profile.id } }),
+    prisma.profileEducation.createMany({ data: educations }),
+    prisma.profileProfession.deleteMany({ where: { profileId: profile.id } }),
+    prisma.profileProfession.createMany({ data: professions }),
+  ]);
+  await recomputeCompletion(profile.id);
+  return getMyProfile(userId);
 }
 
 /**
