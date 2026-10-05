@@ -30,6 +30,18 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     if (err.code === 'P2003') {
       return res.status(400).json({ success: false, message: 'Related record does not exist' });
     }
+    if (err.code === 'P2020') {
+      return res.status(400).json({ success: false, message: 'A value you entered is too large' });
+    }
+  }
+
+  // Safety net for a number too big for its column (Postgres 22003 "numeric field overflow"),
+  // which Prisma may report without a known code: the input was bad, not the server.
+  if (
+    (err instanceof Prisma.PrismaClientKnownRequestError || err instanceof Prisma.PrismaClientUnknownRequestError) &&
+    /numeric field overflow|22003|out of range/i.test(err.message)
+  ) {
+    return res.status(400).json({ success: false, message: 'A value you entered is too large' });
   }
 
   if (err instanceof Prisma.PrismaClientValidationError) {

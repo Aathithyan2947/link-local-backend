@@ -37,9 +37,11 @@ export async function sendMessage(senderId: number, data: SendMessageInput) {
     include: { sender: person, receiver: person },
   });
   await bumpUserStats(senderId, { messagesSent: 1 });
+  // Say who it's from, so the inbox reads "New message from Asha" rather than a bare title.
+  const from = message.sender.profile?.name?.trim();
   await emitNotification({
     userId: data.receiverId,
-    title: data.messageType === 'enquiry' ? 'New enquiry' : 'New message',
+    title: `${data.messageType === 'enquiry' ? 'New enquiry' : 'New message'}${from ? ` from ${from}` : ''}`,
     body: data.content.slice(0, 80),
     type: data.messageType === 'enquiry' ? 'enquiry' : 'message',
     entityType: 'message',

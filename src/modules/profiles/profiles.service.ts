@@ -5,6 +5,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { dateOnly } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
 import { getCustomFieldsForProfile } from '../../lib/customFields.js';
+import { isTravelDistanceField, travelDistanceError } from './profiles.schema.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import type { z } from 'zod';
 import type {
@@ -632,14 +633,19 @@ export async function saveCustomFields(userId: number, values: { fieldId: number
   // Only accept fields that actually belong to the SP's selected subcategories.
   const validFields = await prisma.serviceSubcategoryField.findMany({
     where: { id: { in: values.map((v) => v.fieldId) }, subcategoryId: { in: subcategoryIds }, isActive: true },
-    select: { id: true, isRequired: true, fieldName: true },
+    select: { id: true, isRequired: true, fieldName: true, category: true, fieldType: true },
   });
   const validIds = new Set(validFields.map((f) => f.id));
 
   for (const f of validFields) {
-    if (f.isRequired && !values.find((v) => v.fieldId === f.id)?.value?.trim()) {
+    const value = values.find((v) => v.fieldId === f.id)?.value ?? '';
+    if (f.isRequired && !value.trim()) {
       throw ApiError.badRequest(`${f.fieldName} is required`);
     }
+    // The travel distance shows on the profile as "Travels up to N km": same limit as the
+    // availability form. Details are keyed by field id so the app can mark the field.
+    const distanceError = isTravelDistanceField(f) ? travelDistanceError(value) : null;
+    if (distanceError) throw ApiError.badRequest(distanceError, { [String(f.id)]: [distanceError] });
   }
 
   const toSave = values.filter((v) => validIds.has(v.fieldId) && v.value.trim());

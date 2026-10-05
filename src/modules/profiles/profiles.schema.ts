@@ -1,13 +1,36 @@
 import { z } from 'zod';
 
+/** Limits for the provider's "Set up your profile" fields — the app enforces the same numbers
+ *  (profile_limits.dart) and shows these messages under each field. */
+export const PROFILE_LIMITS = {
+  name: 100,
+  aboutMe: 2000,
+  professionTitle: 80,
+  yearsOfExperience: 80,
+  rateAmount: 1_000_000,
+} as const;
+
 export const updateProfileSchema = z.object({
-  name: z.string().min(1).max(100).optional(),
+  name: z
+    .string()
+    .trim()
+    .min(1, 'Name is required')
+    .max(PROFILE_LIMITS.name, `Name can be at most ${PROFILE_LIMITS.name} characters`)
+    .optional(),
   dateOfBirth: z.coerce.date().optional(),
   gender: z.enum(['male', 'female', 'do_not_disclose']).optional(),
-  aboutMe: z.string().max(2000).optional(),
+  aboutMe: z
+    .string()
+    .max(PROFILE_LIMITS.aboutMe, `About can be at most ${PROFILE_LIMITS.aboutMe} characters`)
+    .optional(),
   ownershipType: z.enum(['owned', 'rented']).optional(),
   residingSince: z.coerce.date().optional(),
-  yearsOfExperience: z.number().int().min(0).max(80).optional(),
+  yearsOfExperience: z
+    .number()
+    .int('Years of experience must be a whole number')
+    .min(0, `Years of experience must be between 0 and ${PROFILE_LIMITS.yearsOfExperience}`)
+    .max(PROFILE_LIMITS.yearsOfExperience, `Years of experience must be between 0 and ${PROFILE_LIMITS.yearsOfExperience}`)
+    .optional(),
   socialMediaShareEnabled: z.boolean().optional(),
   canOfferHelpWith: z.string().max(1000).optional(),
   // Public contact details — NOT the sign-in credentials. Empty string clears them; no
@@ -30,7 +53,10 @@ export const educationSchema = z.object({
 
 export const professionSchema = z.object({
   professionMasterId: z.number().int().optional(),
-  category: z.string().optional(), // self-add if no id
+  category: z
+    .string()
+    .max(PROFILE_LIMITS.professionTitle, `Professional title can be at most ${PROFILE_LIMITS.professionTitle} characters`)
+    .optional(), // self-add if no id
   companyOrDetail: z.string().optional(),
 });
 
@@ -142,13 +168,43 @@ export const ratesSchema = z.object({
     .array(
       z.object({
         rateType: z.enum(['per_session', 'monthly', 'hourly']),
-        amount: z.number().nonnegative(),
+        amount: z
+          .number()
+          .positive('Charge must be greater than 0')
+          .max(PROFILE_LIMITS.rateAmount, 'Charge can be at most ₹10,00,000'),
       }),
     )
     .default([]),
 });
 
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be HH:MM (24h)');
+
+/** How far a service provider may say they travel — a local-services limit (and well inside
+ *  the max_travel_km column, DECIMAL(5,2)). The app enforces the same number on the field. */
+export const MAX_TRAVEL_KM = 100;
+
+/** Kilometres from a typed distance: a number, optionally followed by "km" / "kms" (older
+ *  answers were saved as e.g. "10 km"). Null when it isn't one. */
+export function parseTravelKm(value: string): number | null {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(?:km|kms|kilometers?|kilometres?)?\s*$/i.exec(value);
+  return m ? Number(m[1]) : null;
+}
+
+/** The problem with a travel distance typed as text (a custom field answer), or null. */
+export function travelDistanceError(value: string): string | null {
+  const t = value.trim();
+  if (!t) return null;
+  const km = parseTravelKm(t);
+  if (km == null || !Number.isFinite(km) || km <= 0) return 'Enter a distance greater than 0';
+  if (km > MAX_TRAVEL_KM) return `Maximum travel distance cannot exceed ${MAX_TRAVEL_KM} km`;
+  return null;
+}
+
+/** Which custom field is the travel distance — the same rule the app's profile page uses to
+ *  show "Travels up to N km": a Travel / Service-type field whose name mentions distance. */
+export function isTravelDistanceField(f: { category: string; fieldName: string; fieldType: string }): boolean {
+  return (f.category === 'travel' || f.category === 'service_type') && f.fieldType !== 'pincode' && /distance/i.test(f.fieldName);
+}
 
 export const availabilitySchema = z
   .object({
@@ -157,7 +213,11 @@ export const availabilitySchema = z
     endTime: hhmm,
     slotMinutes: z.number().int().positive().max(24 * 60).nullable().optional(),
     willingToTravel: z.boolean().optional(),
-    maxTravelKm: z.number().nonnegative().optional(),
+    maxTravelKm: z
+      .number()
+      .positive('Enter a distance greater than 0')
+      .max(MAX_TRAVEL_KM, `Maximum travel distance cannot exceed ${MAX_TRAVEL_KM} km`)
+      .optional(),
     horizonDays: z.number().int().min(1).max(90).optional(),
   })
   .refine((v) => v.endTime > v.startTime, { message: 'End time must be after start time', path: ['endTime'] });

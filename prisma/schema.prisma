@@ -1076,6 +1076,8 @@ model PostLike {
   post Post @relation(fields: [postId], references: [id])
   user User @relation(fields: [userId], references: [id])
 
+  /// One like per person per post — rapid or repeated taps can't stack up duplicates.
+  @@unique([postId, userId])
   @@map("post_likes")
 }
 
@@ -1105,6 +1107,8 @@ model PostCommentReaction {
 
   user User @relation(fields: [userId], references: [id])
 
+  /// One reaction of each kind per person per post/comment (comment likes use emoji 'like').
+  @@unique([userId, entityType, entityId, emoji])
   @@map("post_comment_reactions")
 }
 

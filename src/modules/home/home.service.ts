@@ -3,6 +3,9 @@ import { providerLocationInclude, viewerCoords, withPublicLocation } from '../..
 import { withViewerEventState } from '../../lib/eventTiming.js';
 import { visibleMembersWhere } from '../members/members.service.js';
 import { POINTS_PER_REFERRAL } from '../referrals/referrals.service.js';
+// Circular with feed.service, which imports this module's scope helpers — safe because both
+// sides only call each other's functions at request time, never while loading.
+import { decorateDiscussions } from '../feed/feed.service.js';
 
 /** Resolves a user's active city id (primary membership, else profile address). */
 export async function resolveUserCityId(userId: number): Promise<number | null> {
@@ -76,6 +79,25 @@ export function addressScopeFilter(
   }
   if (scope !== 'city' && areaId) return { areaId };
   return ctx.cityId ? { area: { cityId: ctx.cityId } } : {};
+}
+
+/** The name of the place `addressScopeFilter` actually filters by — same fallbacks, so the
+ *  app's "… in <label>" headers can never disagree with the data under them: the society,
+ *  else the lane, else the area (picked or the member's own), else the city. */
+export async function scopeLabel(
+  scope: HomeScope,
+  ctx: ScopeContext,
+  overrideAreaId: number | null,
+  cityName: string | null,
+): Promise<string | null> {
+  const areaId = overrideAreaId ?? ctx.areaId;
+  if (scope === 'society' && areaId && ctx.apartment) return ctx.apartment;
+  if ((scope === 'society' || scope === 'lane') && areaId && ctx.lane1) return ctx.lane1;
+  if (scope !== 'city' && areaId) {
+    const area = await prisma.area.findUnique({ where: { id: areaId }, select: { areaName: true } });
+    return area?.areaName ?? cityName;
+  }
+  return cityName;
 }
 
 export const HOME_SCOPES: readonly HomeScope[] = ['society', 'lane', 'area', 'city'] as const;
@@ -240,7 +262,9 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
       message: `Earn ₹${POINTS_PER_REFERRAL} for every friend you refer`,
       balance: stats?.referralPointsBalance ?? 0,
     },
-    discussions,
+    // Names the location every section is filtered by (see scopeLabel).
+    scopeLabel: await scopeLabel(scope, ctx, overrideAreaId, city?.name ?? null),
+    discussions: await decorateDiscussions(discussions, userId),
     groups: { total: groupCount, items: groups },
     workshops: { total: workshopCount, items: await withViewerEventState(workshops, userId) },
     serviceProviders: {

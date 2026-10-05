@@ -36,6 +36,7 @@ export const nearbySchema = z.object({
 export const listMasterSchema = paginationSchema.extend({
   q: z.string().optional(),
   status: z.enum(['pending', 'approved', 'rejected', 'all']).optional(),
+  cityId: z.coerce.number().int().positive().optional(),
 });
 
 export const reviewMasterSchema = z.object({

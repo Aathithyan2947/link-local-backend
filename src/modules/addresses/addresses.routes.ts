@@ -112,6 +112,7 @@ addressesRouter.get(
       pageSize: number;
       q?: string;
       status?: string;
+      cityId?: number;
     }>(req);
     const { items, meta } = await service.listMaster(query);
     paginated(res, items, meta);
@@ -154,6 +155,32 @@ addressesRouter.patch(
   }),
 );
 
+// The columns the importer reads, with sample rows — shown before an upload.
+addressesRouter.get(
+  '/admin/import/format',
+  authenticate('admin'),
+  asyncHandler(async (_req, res) => {
+    ok(res, service.IMPORT_FORMAT);
+  }),
+);
+
+// The same format as a ready-to-fill .xlsx: the header row plus the sample rows.
+addressesRouter.get(
+  '/admin/import/template',
+  authenticate('admin'),
+  asyncHandler(async (_req, res) => {
+    const headers = service.IMPORT_FORMAT.columns.map((c) => c.header);
+    const sheet = XLSX.utils.json_to_sheet(service.IMPORT_FORMAT.sampleRows, { header: headers });
+    sheet['!cols'] = headers.map((h) => ({ wch: Math.max(14, h.length + 2) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, sheet, 'Localities');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="address-master-sample.xlsx"');
+    res.send(buffer);
+  }),
+);
+
 // Bulk import localities into the master from an Excel/CSV sheet
 addressesRouter.post(
   '/admin/import',
@@ -168,6 +195,10 @@ addressesRouter.post(
       rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
     } catch {
       throw ApiError.badRequest('Could not parse the spreadsheet');
+    }
+    if (!rows.length) throw ApiError.badRequest('The sheet has no data rows under the header row');
+    if (!Object.keys(rows[0]).some((k) => k.trim().toLowerCase() === 'city')) {
+      throw ApiError.badRequest('No "City" column found — use the headers from the sample sheet');
     }
     const result = await service.importAddresses(rows);
     await writeAudit(req.auth!.sub, 'import_addresses', 'address', undefined, result);

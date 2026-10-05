@@ -13,6 +13,7 @@ import {
 import { bumpUserStats } from '../../lib/stats.js';
 import { emitNotification } from '../../lib/notify.js';
 import { mockCharge } from '../../lib/payments.js';
+import { decorateDiscussions } from '../feed/feed.service.js';
 import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
 import { computeOpenSlots } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
@@ -272,38 +273,59 @@ export async function updateEvent(eventId: number, userId: number, data: Partial
   return updated;
 }
 
-export async function joinEvent(eventId: number, userId: number) {
+/**
+ * Checks a user may enter the event, returning it with their existing attendee row. Shared
+ * by joining (free events) and paying (paid events) so both enforce the same rules.
+ */
+async function eventEntry(eventId: number, userId: number) {
   const event = await prisma.event.findUnique({
     where: { id: eventId },
     include: { _count: { select: { attendees: { where: { status: 'joined' } } } } },
   });
   if (!event) throw ApiError.notFound('Event not found');
   if (event.creatorId === userId) throw ApiError.badRequest('You are hosting this event');
-
   const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
-  if (existing?.status === 'joined') return existing;
+  if (existing?.status === 'joined' || existing?.status === 'pending_approval') {
+    return { event, existing, alreadyIn: true };
+  }
   if (hasEventStarted(event)) throw ApiError.badRequest('This event has already started');
-
   if (event.maxAttendees && event._count.attendees >= event.maxAttendees) {
     throw ApiError.badRequest('This event is full');
   }
+  return { event, existing, alreadyIn: false };
+}
 
+/** Adds (or re-adds) the attendee — awaiting approval when the host vets attendees. */
+async function admitAttendee(
+  event: { id: number; title: string; creatorId: number; adminApprovalNeeded: boolean },
+  userId: number,
+  existing: { id: number } | null,
+  paymentStatus: string | null,
+) {
   const status = event.adminApprovalNeeded ? 'pending_approval' : 'joined';
-  const paymentStatus = event.isPaid ? 'unpaid' : null;
-
   const attendee = existing
     ? await prisma.eventAttendee.update({ where: { id: existing.id }, data: { status, paymentStatus } })
-    : await prisma.eventAttendee.create({ data: { eventId, userId, status, paymentStatus } });
-
+    : await prisma.eventAttendee.create({ data: { eventId: event.id, userId, status, paymentStatus } });
   await emitNotification({
     userId: event.creatorId,
     title: 'New attendee',
     body: `Someone joined "${event.title}"`,
     type: 'event_invite',
     entityType: 'event',
-    entityId: eventId,
+    entityId: event.id,
   });
   return attendee;
+}
+
+/** Joins a free event. A paid event is joined only by paying (`payForEvent`). */
+export async function joinEvent(eventId: number, userId: number) {
+  const { event, existing, alreadyIn } = await eventEntry(eventId, userId);
+  if (alreadyIn) return existing!;
+  // Someone who paid and later withdrew rejoins without paying again.
+  if (event.isPaid && existing?.paymentStatus !== 'paid') {
+    throw new ApiError(402, 'Payment required to join this event', { amount: Number(event.price ?? 0) });
+  }
+  return admitAttendee(event, userId, existing, event.isPaid ? 'paid' : null);
 }
 
 export async function withdrawEvent(eventId: number, userId: number) {
@@ -314,10 +336,13 @@ export async function withdrawEvent(eventId: number, userId: number) {
   return prisma.eventAttendee.update({ where: { id: existing.id }, data: { status: 'withdrawn' } });
 }
 
+/** Pays for a paid event; the user becomes an attendee only once the charge succeeds. */
 export async function payForEvent(eventId: number, userId: number, couponCode?: string) {
-  const event = await prisma.event.findUnique({ where: { id: eventId } });
-  if (!event) throw ApiError.notFound('Event not found');
+  const { event, existing, alreadyIn } = await eventEntry(eventId, userId);
   if (!event.isPaid) throw ApiError.badRequest('This event is free');
+  if (existing?.paymentStatus === 'paid') {
+    throw ApiError.conflict(alreadyIn ? 'You have already paid for this event' : 'Already paid — join again for free');
+  }
 
   const base = Number(event.price ?? 0);
   const coupon = await resolveCoupon(couponCode, base);
@@ -339,17 +364,11 @@ export async function payForEvent(eventId: number, userId: number, couponCode?: 
   });
   if (coupon) await redeemCoupon(coupon.couponId, userId, 'event', payment.id);
 
-  // ensure the attendee row is joined + paid
-  const existing = await prisma.eventAttendee.findFirst({ where: { eventId, userId } });
-  if (existing) {
-    await prisma.eventAttendee.update({
-      where: { id: existing.id },
-      data: { status: 'joined', paymentStatus: 'paid' },
-    });
+  if (alreadyIn) {
+    // Joined before payment was enforced: keep their place, now paid.
+    await prisma.eventAttendee.update({ where: { id: existing!.id }, data: { paymentStatus: 'paid' } });
   } else {
-    await prisma.eventAttendee.create({
-      data: { eventId, userId, status: 'joined', paymentStatus: 'paid' },
-    });
+    await admitAttendee(event, userId, existing, 'paid');
   }
   return payment;
 }
@@ -518,10 +537,11 @@ export async function getGroup(id: number, viewerId?: number) {
   const { posts, ...rest } = group;
   // Whoever created the group anchors it to a place; that is what the discussions header names.
   const area = group.creator.profile?.address?.area?.areaName ?? null;
-  const discussions = posts
+  const visible = posts
     .map((gp) => gp.post)
     // "Clear chat" hides history for the member who asked, not for the group.
     .filter((post) => clearedAt === null || post.createdAt > clearedAt);
+  const discussions = viewerId ? await decorateDiscussions(visible, viewerId) : visible;
 
   return {
     ...rest,
@@ -565,9 +585,10 @@ export async function listGroupDiscussions(groupId: number, viewerId: number, ar
     },
   });
 
-  return rows
-    .map((gp) => gp.post)
-    .filter((post) => clearedAt === null || post.createdAt > clearedAt);
+  return decorateDiscussions(
+    rows.map((gp) => gp.post).filter((post) => clearedAt === null || post.createdAt > clearedAt),
+    viewerId,
+  );
 }
 
 /** Joined members of a group, for the Members action on the group profile. */
@@ -662,29 +683,42 @@ export async function updateGroup(groupId: number, userId: number, data: Partial
   return updated;
 }
 
-export async function joinGroup(groupId: number, userId: number) {
+/**
+ * Checks a user may enter the group, returning it with their existing membership. Shared by
+ * joining (free groups) and paying (paid groups) so both enforce the same rules.
+ */
+async function groupEntry(groupId: number, userId: number) {
   const group = await prisma.interestGroup.findUnique({
     where: { id: groupId },
     include: { _count: { select: { members: { where: { status: 'joined' } } } } },
   });
   if (!group) throw ApiError.notFound('Group not found');
   if (group.creatorId === userId) throw ApiError.badRequest('You created this group');
-
   const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
-  if (existing?.status === 'joined') return existing;
+  if (existing?.status === 'joined' || existing?.status === 'pending_approval') {
+    return { group, existing, alreadyIn: true };
+  }
   if (group.maxMembers && group._count.members >= group.maxMembers) {
     throw ApiError.badRequest('This group is full');
   }
+  return { group, existing, alreadyIn: false };
+}
 
+/** Adds (or re-adds) the member — awaiting approval when the group vets members. */
+async function admitMember(
+  group: { id: number; title: string; creatorId: number; adminApprovalNeeded: boolean },
+  userId: number,
+  existing: { id: number } | null,
+  paymentStatus: string | null,
+) {
   const status = group.adminApprovalNeeded ? 'pending_approval' : 'joined';
-  const paymentStatus = group.isPaid ? 'unpaid' : null;
   const member = existing
     ? await prisma.interestGroupMember.update({ where: { id: existing.id }, data: { status, paymentStatus } })
-    : await prisma.interestGroupMember.create({ data: { groupId, userId, status, paymentStatus } });
+    : await prisma.interestGroupMember.create({ data: { groupId: group.id, userId, status, paymentStatus } });
 
   if (status === 'joined') await bumpUserStats(userId, { groupsPartOf: 1 });
   const creatorMembership = await prisma.interestGroupMember.findFirst({
-    where: { groupId, userId: group.creatorId },
+    where: { groupId: group.id, userId: group.creatorId },
     select: { muted: true },
   });
   if (!creatorMembership?.muted) {
@@ -694,10 +728,21 @@ export async function joinGroup(groupId: number, userId: number) {
       body: `Someone joined "${group.title}"`,
       type: 'group_invite',
       entityType: 'group',
-      entityId: groupId,
+      entityId: group.id,
     });
   }
   return member;
+}
+
+/** Joins a free group. A paid group is joined only by paying (`payForGroup`). */
+export async function joinGroup(groupId: number, userId: number) {
+  const { group, existing, alreadyIn } = await groupEntry(groupId, userId);
+  if (alreadyIn) return existing!;
+  // Someone who paid and later exited rejoins without paying again.
+  if (group.isPaid && existing?.paymentStatus !== 'paid') {
+    throw new ApiError(402, 'Payment required to join this group', { amount: Number(group.price ?? 0) });
+  }
+  return admitMember(group, userId, existing, group.isPaid ? 'paid' : null);
 }
 
 export async function leaveGroup(groupId: number, userId: number) {
@@ -709,10 +754,13 @@ export async function leaveGroup(groupId: number, userId: number) {
   return prisma.interestGroupMember.update({ where: { id: existing.id }, data: { status: 'exited' } });
 }
 
+/** Pays for a paid group; the user becomes a member only once the charge succeeds. */
 export async function payForGroup(groupId: number, userId: number, couponCode?: string) {
-  const group = await prisma.interestGroup.findUnique({ where: { id: groupId } });
-  if (!group) throw ApiError.notFound('Group not found');
+  const { group, existing, alreadyIn } = await groupEntry(groupId, userId);
   if (!group.isPaid) throw ApiError.badRequest('This group is free');
+  if (existing?.paymentStatus === 'paid') {
+    throw ApiError.conflict(alreadyIn ? 'You have already paid for this group' : 'Already paid — join again for free');
+  }
 
   const base = Number(group.price ?? 0);
   const coupon = await resolveCoupon(couponCode, base);
@@ -734,16 +782,11 @@ export async function payForGroup(groupId: number, userId: number, couponCode?: 
   });
   if (coupon) await redeemCoupon(coupon.couponId, userId, 'group', payment.id);
 
-  const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
-  if (existing) {
-    await prisma.interestGroupMember.update({
-      where: { id: existing.id },
-      data: { status: 'joined', paymentStatus: 'paid' },
-    });
+  if (alreadyIn) {
+    // Joined before payment was enforced: keep their place, now paid.
+    await prisma.interestGroupMember.update({ where: { id: existing!.id }, data: { paymentStatus: 'paid' } });
   } else {
-    await prisma.interestGroupMember.create({
-      data: { groupId, userId, status: 'joined', paymentStatus: 'paid' },
-    });
+    await admitMember(group, userId, existing, 'paid');
   }
   return payment;
 }

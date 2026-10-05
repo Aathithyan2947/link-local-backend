@@ -23,6 +23,9 @@ const createPostSchema = z.object({
     .optional(),
 });
 
+const likeSchema = z.object({ liked: z.boolean() });
+const commentsQuery = paginationSchema.extend({ sort: z.enum(['top', 'newest']).default('top') });
+
 const commentSchema = z.object({
   comment: z.string().min(1).max(2000),
   parentCommentId: z.number().int().optional(),
@@ -57,6 +60,50 @@ feedRouter.post(
   authenticate('user'),
   asyncHandler(async (req, res) =>
     ok(res, await service.toggleLike(req.auth!.sub, Number(req.params.id))),
+  ),
+);
+
+// Set a like to a given state — idempotent, so repeated taps can't double-count.
+feedRouter.put(
+  '/:id/like',
+  authenticate('user'),
+  validate({ body: likeSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.setPostLike(req.auth!.sub, Number(req.params.id), req.body.liked)),
+  ),
+);
+feedRouter.put(
+  '/comments/:commentId/like',
+  authenticate('user'),
+  validate({ body: likeSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.setCommentLike(req.auth!.sub, Number(req.params.commentId), req.body.liked)),
+  ),
+);
+// Legacy toggle for a comment like (older app builds).
+feedRouter.post(
+  '/comments/:commentId/like',
+  authenticate('user'),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.toggleCommentLike(req.auth!.sub, Number(req.params.commentId))),
+  ),
+);
+
+// Comments panel: a page of top-level comments, then each thread's replies on demand.
+feedRouter.get(
+  '/:id/comments',
+  authenticate('user'),
+  validate({ query: commentsQuery }),
+  asyncHandler(async (req, res) => {
+    const q = getValidatedQuery<z.infer<typeof commentsQuery>>(req);
+    ok(res, await service.listComments(Number(req.params.id), req.auth!.sub, q));
+  }),
+);
+feedRouter.get(
+  '/comments/:commentId/replies',
+  authenticate('user'),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.listReplies(Number(req.params.commentId), req.auth!.sub)),
   ),
 );
 

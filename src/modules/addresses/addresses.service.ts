@@ -508,9 +508,10 @@ function masterToItem(m: {
  * Admin "Address Master" listing — deduped localities with their approval status.
  * Intentionally exposes NO user / building / flat information.
  */
-export async function listMaster(params: PaginationParams & { q?: string; status?: string }) {
+export async function listMaster(params: PaginationParams & { q?: string; status?: string; cityId?: number }) {
   const where: Record<string, unknown> = {};
   if (params.status && params.status !== 'all') where.status = params.status;
+  if (params.cityId) where.cityId = params.cityId;
   if (params.q) {
     where.OR = [
       { complex: { contains: params.q, mode: 'insensitive' } },
@@ -652,10 +653,39 @@ export async function saveCityAddressFields(cityId: number, fields: AddressField
 }
 
 /**
- * Bulk-import localities into the Address Master from a parsed spreadsheet. Each row maps
- * the source-sheet headers (Lane 1 / Lane 2 / Area / Suburb / City / Pincode) to an APPROVED
- * master locality. The building/complex-name column is intentionally ignored — the master
- * never stores buildings. Rows are deduped by (city, lane1, lane2, area).
+ * The spreadsheet format the importer reads, shown to admins (and downloadable as a sample
+ * .xlsx) so their sheet matches. Header matching ignores case; `aliases` are also accepted.
+ */
+export const IMPORT_FORMAT = {
+  columns: [
+    { header: 'City', required: true, note: 'Must match an existing city (any letter case)', aliases: [] },
+    { header: 'Complex Name', required: false, note: 'Building / complex name', aliases: ['complex', 'apartment', 'building'] },
+    { header: 'Lane 1', required: false, note: 'At least one of Lane 1, Lane 2, Area or Suburb', aliases: ['lane1'] },
+    { header: 'Lane 2', required: false, note: '', aliases: ['lane2', 'locality'] },
+    { header: 'Area', required: false, note: '', aliases: [] },
+    { header: 'Suburb', required: false, note: '', aliases: [] },
+    { header: 'Pincode', required: false, note: '6 digits, not starting with 0', aliases: ['pin code', 'zip'] },
+    { header: 'Latitude', required: false, note: 'Optional; with Longitude, powers 2 km nearby autofill', aliases: ['lat'] },
+    { header: 'Longitude', required: false, note: 'Optional; give both or neither', aliases: ['lng', 'long'] },
+  ],
+  sampleRows: [
+    {
+      City: 'Mumbai', 'Complex Name': 'Sudarshan Sky Garden', 'Lane 1': 'Ghodbunder Road', 'Lane 2': 'Anand Nagar',
+      Area: 'Sai Nagar', Suburb: 'Thane West', Pincode: '400615', Latitude: 19.2652467, Longitude: 72.9670021,
+    },
+    {
+      City: 'Mumbai', 'Complex Name': 'Sea View Palace', 'Lane 1': 'Pali Hill Road', 'Lane 2': '',
+      Area: 'Pali Hill', Suburb: 'Bandra West', Pincode: '400050', Latitude: '', Longitude: '',
+    },
+  ] as Array<Record<string, string | number>>,
+};
+
+const MAX_REPORTED_ERRORS = 50;
+
+/**
+ * Bulk-import localities into the Address Master from a parsed spreadsheet (see
+ * IMPORT_FORMAT). Each row becomes an APPROVED master locality in an existing city; rows are
+ * deduped by (city, complex, lane1, lane2). Every skipped row is reported with its reason.
  */
 /** One spreadsheet row's locality fields: each optional, but held to the shared rules. */
 const importRowSchema = z.object({
@@ -673,6 +703,11 @@ export async function importAddresses(
   const errors: string[] = [];
   let created = 0;
   let skipped = 0;
+  // Sheet row numbers: the header is row 1, so data row i is row i + 2.
+  const skip = (i: number, reason: string) => {
+    skipped++;
+    if (errors.length < MAX_REPORTED_ERRORS) errors.push(`Row ${i + 2}: ${reason}`);
+  };
 
   const pick = (r: Record<string, unknown>, keys: string[]): string => {
     for (const k of Object.keys(r)) {
@@ -684,8 +719,9 @@ export async function importAddresses(
     return '';
   };
 
-  const cityCache = new Map<string, number>();
-  const seen = new Set<string>();
+  // Unknown cities are skipped, never created: a typo like "Mumbia" must not add a city.
+  const cityCache = new Map<string, number | null>();
+  const seen = new Map<string, number>(); // dedupe key → sheet row it first appeared on
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -698,10 +734,17 @@ export async function importAddresses(
       suburb: pick(r, ['suburb']),
       pincode: pick(r, ['pincode', 'pin code', 'zip']),
     };
+    const latRaw = pick(r, ['latitude', 'lat']);
+    const lngRaw = pick(r, ['longitude', 'lng', 'long']);
 
-    // Need a city and at least one locality field to form a master entry.
-    if (!cityName || (!raw.lane1 && !raw.lane2 && !raw.area && !raw.suburb)) {
-      skipped++;
+    // Blank rows (e.g. trailing ones Excel keeps) are ignored, not counted as skipped.
+    if (!cityName && Object.values(raw).every((v) => !v) && !latRaw && !lngRaw) continue;
+    if (!cityName) {
+      skip(i, 'City is required');
+      continue;
+    }
+    if (!raw.lane1 && !raw.lane2 && !raw.area && !raw.suburb) {
+      skip(i, 'Needs at least one of Lane 1, Lane 2, Area or Suburb');
       continue;
     }
 
@@ -711,38 +754,61 @@ export async function importAddresses(
       Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== '')),
     );
     if (!checked.success) {
-      skipped++;
-      if (errors.length < 5) errors.push(`Row ${i + 2}: ${checked.error.issues[0]?.message ?? 'invalid value'}`);
+      skip(i, checked.error.issues[0]?.message ?? 'invalid value');
       continue;
     }
     const { complex = '', lane1 = '', lane2 = '', area = '', suburb = '', pincode = '' } = checked.data;
 
+    // Coordinates are optional, but must come as a valid pair.
+    let latitude: number | undefined;
+    let longitude: number | undefined;
+    if (latRaw || lngRaw) {
+      latitude = Number(latRaw);
+      longitude = Number(lngRaw);
+      if (!latRaw || !lngRaw) {
+        skip(i, 'Give both Latitude and Longitude, or neither');
+        continue;
+      }
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+        skip(i, 'Latitude must be a number between -90 and 90');
+        continue;
+      }
+      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+        skip(i, 'Longitude must be a number between -180 and 180');
+        continue;
+      }
+    }
+
     try {
-      let cityId = cityCache.get(cityName.toLowerCase());
+      const cityKey = cityName.toLowerCase();
+      if (!cityCache.has(cityKey)) {
+        const city = await prisma.city.findFirst({ where: { name: { equals: cityName, mode: 'insensitive' } } });
+        cityCache.set(cityKey, city?.id ?? null);
+      }
+      const cityId = cityCache.get(cityKey);
       if (!cityId) {
-        const existing = await prisma.city.findFirst({ where: { name: cityName } });
-        cityId = existing?.id ?? (await prisma.city.create({ data: { name: cityName } })).id;
-        cityCache.set(cityName.toLowerCase(), cityId);
-        await ensureCityOtherDocType(cityId);
+        skip(i, `Unknown city "${cityName}"`);
+        continue;
       }
 
       const dedupeKey = `${cityId}|${complex.toLowerCase()}|${lane1.toLowerCase()}|${lane2.toLowerCase()}`;
-      if (seen.has(dedupeKey)) {
-        skipped++;
+      const firstRow = seen.get(dedupeKey);
+      if (firstRow != null) {
+        skip(i, `Duplicate of row ${firstRow + 2}`);
         continue;
       }
-      seen.add(dedupeKey);
+      seen.set(dedupeKey, i);
 
       const existing = await prisma.addressMaster.findFirst({
         where: {
           cityId,
-          complex: complex || null,
-          lane1: lane1 || null,
-          lane2: lane2 || null,
+          complex: complex ? { equals: complex, mode: 'insensitive' } : null,
+          lane1: lane1 ? { equals: lane1, mode: 'insensitive' } : null,
+          lane2: lane2 ? { equals: lane2, mode: 'insensitive' } : null,
         },
       });
       if (existing) {
-        skipped++;
+        skip(i, 'Already in the Address Master');
         continue;
       }
 
@@ -755,14 +821,15 @@ export async function importAddresses(
           area: area || undefined,
           suburb: suburb || undefined,
           pincode: pincode || undefined,
+          latitude,
+          longitude,
           status: 'approved',
           source: 'import',
         },
       });
       created++;
     } catch (e) {
-      skipped++;
-      if (errors.length < 5) errors.push(`Row ${i + 2}: ${(e as Error).message}`);
+      skip(i, (e as Error).message);
     }
   }
 
