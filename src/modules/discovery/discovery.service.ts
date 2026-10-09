@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { assertProfileVisible, visibleProfileWhere } from '../../lib/profileVisibility.js';
 import { providerLocationInclude, viewerCoords, withPublicLocation } from '../../lib/providerLocation.js';
 import { hasEventStarted, withViewerEventState } from '../../lib/eventTiming.js';
 import { destroyByUrl } from '../../lib/cloudinary.js';
@@ -435,7 +436,7 @@ export async function myEvents(userId: number) {
 // ── Interest Groups ──────────────────────────────────────────
 export async function listGroups(
   userId: number,
-  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number },
+  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number; excludeMine?: boolean },
 ) {
   const ctx = await resolveUserScopeContext(userId);
   const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
@@ -446,15 +447,19 @@ export async function listGroups(
     ...(hasFilter ? { creator: { profile: { address: addressFilter } } } : {}),
   };
   if (params.q) where.title = { contains: params.q, mode: 'insensitive' };
+  // Groups to discover only: not the caller's own, nor ones they're in or waiting to join.
+  if (params.excludeMine) {
+    where.creatorId = { not: userId };
+    where.members = { none: { userId, status: { in: ['joined', 'pending_approval'] } } };
+  }
 
   const [items, total] = await Promise.all([
     prisma.interestGroup.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      include: {
-        creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
-        _count: { select: { members: true } },
-      },
+      // Same card shape as My Groups: the member count is people who have joined (not those
+      // who left or are still waiting).
+      include: groupCardInclude,
       ...toPrismaPagination(params),
     }),
     prisma.interestGroup.count({ where }),
@@ -845,8 +850,10 @@ export async function myGroups(userId: number) {
       orderBy: { createdAt: 'desc' },
       include: groupCardInclude,
     }),
+    // Groups the member joined. Their own groups list them as a member too, but those belong
+    // under "Your Groups" only.
     prisma.interestGroup.findMany({
-      where: { isActive: true, members: { some: { userId, status: 'joined' } } },
+      where: { isActive: true, creatorId: { not: userId }, members: { some: { userId, status: 'joined' } } },
       orderBy: { createdAt: 'desc' },
       include: groupCardInclude,
     }),
@@ -864,7 +871,10 @@ export async function listServiceProviders(
   const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
   const hasFilter = Object.keys(addressFilter).length > 0;
   const where: Record<string, unknown> = {
-    user: { userType: 'service_provider', isActive: true },
+    // Not the viewer themselves (as on Home), so both screens count the same providers.
+    user: { id: { not: userId }, userType: 'service_provider', isActive: true },
+    // Only providers whose Profile visibility lets this viewer see them.
+    AND: [visibleProfileWhere(ctx)],
   };
   if (hasFilter) where.address = addressFilter;
   if (params.q) where.name = { contains: params.q, mode: 'insensitive' };
@@ -931,6 +941,11 @@ export async function getServiceProvider(id: number, callerId?: number) {
     },
   });
   if (!sp) throw ApiError.notFound('Service provider not found');
+  // Their Profile visibility setting decides who may open this page.
+  await assertProfileVisible(
+    { userId: sp.userId, profileId: sp.id, address: sp.address ? { areaId: sp.address.areaId, apartment: sp.address.apartment } : null },
+    callerId,
+  );
 
   const userId = sp.userId;
   const eventInclude = {

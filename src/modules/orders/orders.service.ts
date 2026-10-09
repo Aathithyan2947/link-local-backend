@@ -388,6 +388,24 @@ export async function getOrder(id: number, viewerId: number) {
   return attachAmountDue(order);
 }
 
+// ── Payments "seen" marker (profile → Payments badge) ────────
+/** When the member last opened Payments. Stored on the user so every device agrees. */
+export async function paymentsSeen(userId: number) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { paymentsSeenAt: true } });
+  if (!user) throw ApiError.notFound('User not found');
+  return { seenAt: user.paymentsSeenAt };
+}
+
+/** Payments was opened: everything up to now (server time) has been seen. */
+export async function markPaymentsSeen(userId: number) {
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: { paymentsSeenAt: new Date() },
+    select: { paymentsSeenAt: true },
+  });
+  return { seenAt: user.paymentsSeenAt };
+}
+
 export async function myOrders(buyerId: number) {
   return prisma.order.findMany({ where: { buyerId }, orderBy: { placedAt: 'desc' }, include: orderInclude });
 }

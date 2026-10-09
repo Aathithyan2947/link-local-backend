@@ -327,6 +327,8 @@ model User {
   isVerified       Boolean  @default(false) @map("is_verified")
   isActive         Boolean  @default(true) @map("is_active")
   isBlocked        Boolean  @default(false) @map("is_blocked")
+  /// When the member last opened Payments; payments after it count as new (profile badge).
+  paymentsSeenAt   DateTime @default(now()) @map("payments_seen_at")
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 

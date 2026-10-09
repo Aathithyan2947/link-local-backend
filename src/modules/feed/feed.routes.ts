@@ -13,6 +13,8 @@ const listQuery = paginationSchema.extend({
   postType: z.enum(['buy_sell', 'ask_help', 'offer_help', 'share_update']).optional(),
   scope: z.enum(['society', 'lane', 'area', 'city']).optional(),
   areaId: z.coerce.number().int().optional(),
+  /** One member's posts (a profile's "View More"), wherever they live. */
+  userId: z.coerce.number().int().optional(),
 });
 
 const createPostSchema = z.object({
@@ -107,11 +109,16 @@ feedRouter.get(
   ),
 );
 
+/** How a post was shared. `chat` = sent in a LinkLocal chat; `in_app` is what builds before
+ *  in-app sharing sent (kept so they don't break). Sharing to other apps will add its own. */
+const shareSchema = z.object({ channel: z.enum(['chat', 'in_app']).default('chat') });
+
 feedRouter.post(
   '/:id/share',
   authenticate('user'),
+  validate({ body: shareSchema }),
   asyncHandler(async (req, res) =>
-    ok(res, await service.sharePost(req.auth!.sub, Number(req.params.id), req.body?.channel), 201),
+    ok(res, await service.sharePost(req.auth!.sub, Number(req.params.id), req.body.channel), 201),
   ),
 );
 

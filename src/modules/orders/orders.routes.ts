@@ -86,6 +86,8 @@ ordersRouter.post(
   ),
 );
 ordersRouter.post('/quote', auth, validate({ body: quoteSchema }), asyncHandler(async (req, res) => ok(res, await service.quoteOrder(req.body))));
+ordersRouter.get('/payments/seen', auth, asyncHandler(async (req, res) => ok(res, await service.paymentsSeen(req.auth!.sub))));
+ordersRouter.put('/payments/seen', auth, asyncHandler(async (req, res) => ok(res, await service.markPaymentsSeen(req.auth!.sub))));
 ordersRouter.get('/mine', auth, asyncHandler(async (req, res) => ok(res, await service.myOrders(req.auth!.sub))));
 ordersRouter.get('/incoming', auth, asyncHandler(async (req, res) => ok(res, await service.incomingOrders(req.auth!.sub))));
 ordersRouter.get('/:id', auth, asyncHandler(async (req, res) => ok(res, await service.getOrder(Number(req.params.id), req.auth!.sub))));

@@ -63,10 +63,21 @@ async function likedSet(userId: number, postIds: number[]): Promise<Set<number>>
 
 export async function listPosts(
   userId: number,
-  params: PaginationParams & { postType?: string; scope?: HomeScope; areaId?: number },
+  params: PaginationParams & { postType?: string; scope?: HomeScope; areaId?: number; userId?: number },
 ) {
   const where: Record<string, unknown> = { isActive: true };
   if (params.postType) where.postType = params.postType;
+
+  // A profile's "View More": everything that member posted, not limited to the viewer's city
+  // (the profile itself already shows their latest posts the same way).
+  if (params.userId !== undefined) {
+    where.userId = params.userId;
+    const [items, total] = await Promise.all([
+      prisma.post.findMany({ where, orderBy: { createdAt: 'desc' }, include: postInclude, ...toPrismaPagination(params) }),
+      prisma.post.count({ where }),
+    ]);
+    return { items: await decorateDiscussions(items, userId), meta: buildMeta(params.page, params.pageSize, total) };
+  }
 
   // Home's Community Discussions header can be re-scoped to a single area, the same way the
   // service-provider / workshop / group sections already are. Without a scope or area this
@@ -448,14 +459,61 @@ export async function decorateDiscussions<T extends { id: number }>(posts: T[], 
 }
 
 /** Records a post share (both the post-specific and unified entity_shares logs). */
-export async function sharePost(userId: number, postId: number, channel?: string) {
-  const post = await prisma.post.findUnique({ where: { id: postId }, select: { id: true } });
-  if (!post) throw ApiError.notFound('Post not found');
+/** Whether [userId] may share the post: it exists and is live, its author allows sharing,
+ *  and for a group post they're a member (the same rule as liking and replying). */
+export async function assertCanSharePost(postId: number, userId: number) {
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { isActive: true, sharingAllowed: true },
+  });
+  if (!post || !post.isActive) throw ApiError.notFound('Post not found');
+  if (!post.sharingAllowed) throw ApiError.forbidden("This post can't be shared");
   await assertCanInteract(postId, userId);
+}
+
+/** A shared post as a chat shows it: who wrote it, what it says, its first photo. */
+export async function postPreviews(postIds: number[]) {
+  if (postIds.length === 0) return new Map<number, ReturnType<typeof toPreview>>();
+  const posts = await prisma.post.findMany({
+    where: { id: { in: [...new Set(postIds)] } },
+    select: {
+      id: true,
+      postType: true,
+      textContent: true,
+      isActive: true,
+      ...authorSelect,
+      media: { take: 1, orderBy: { sortOrder: 'asc' }, select: { url: true, mediaType: true } },
+    },
+  });
+  return new Map(posts.map((p) => [p.id, toPreview(p)]));
+}
+
+function toPreview(p: {
+  id: number;
+  postType: string;
+  textContent: string | null;
+  isActive: boolean;
+  user: { id: number; profile: { name: string | null; photoUrl: string | null } | null };
+  media: { url: string; mediaType: string }[];
+}) {
+  const photo = p.media.find((m) => m.mediaType === 'photo');
+  return {
+    id: p.id,
+    postType: p.postType,
+    text: p.textContent ?? '',
+    authorName: p.user.profile?.name ?? 'Member',
+    authorPhoto: p.user.profile?.photoUrl ?? null,
+    photoUrl: photo?.url ?? null,
+    isActive: p.isActive,
+  };
+}
+
+export async function sharePost(userId: number, postId: number, channel?: string) {
+  await assertCanSharePost(postId, userId);
   await prisma.$transaction([
     prisma.postShare.create({ data: { postId, userId } }),
     prisma.entityShare.create({
-      data: { userId, entityType: 'post', entityId: postId, sharingChannel: channel ?? 'in_app' },
+      data: { userId, entityType: 'post', entityId: postId, sharingChannel: channel ?? 'chat' },
     }),
   ]);
   return { shared: true };

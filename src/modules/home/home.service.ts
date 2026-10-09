@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { visibleProfileWhere } from '../../lib/profileVisibility.js';
 import { providerLocationInclude, viewerCoords, withPublicLocation } from '../../lib/providerLocation.js';
 import { withViewerEventState } from '../../lib/eventTiming.js';
 import { visibleMembersWhere } from '../members/members.service.js';
@@ -130,7 +131,7 @@ async function countByScope(
     entries.map(async ([, filter]) => {
       const has = Object.keys(filter).length > 0;
       const creatorWhere = has ? { creator: { profile: { address: filter } } } : {};
-      const spWhere = has ? { address: filter } : {};
+      const spWhere = { ...(has ? { address: filter } : {}), AND: [visibleProfileWhere(ctx)] };
       const [sps, events, groups] = await Promise.all([
         prisma.profile.count({
           where: { user: { id: { not: userId }, userType: 'service_provider', isActive: true }, ...spWhere },
@@ -201,7 +202,9 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
 
   const cityWhere = hasFilter ? { creator: { profile: { address: addressFilter } } } : {};
   const postCityWhere = hasFilter ? { user: { profile: { address: addressFilter } } } : {};
-  const spCityWhere = hasFilter ? { address: addressFilter } : {};
+  // Providers the viewer may see (Profile visibility) — the list, its count and the service
+  // badges all use this, so the numbers match the list behind them.
+  const spCityWhere = { ...(hasFilter ? { address: addressFilter } : {}), AND: [visibleProfileWhere(ctx)] };
   // Same rule as the Members list, so the tile's number matches the list behind it.
   const memberWhere = visibleMembersWhere(userId, ctx, addressFilter);
 

@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { addressMatches, profileVisibleTo, type VisibilityAddress } from '../../lib/profileVisibility.js';
 import { withViewerEventState } from '../../lib/eventTiming.js';
 import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
@@ -105,16 +106,7 @@ export async function setRates(userId: number, input: z.infer<typeof ratesSchema
   return prisma.spRate.findMany({ where: { profileId: profile.id, isActive: true }, orderBy: { id: 'asc' } });
 }
 
-type OwnerAddress = { areaId: number; apartment: string | null } | null;
-
-/** 'area' scope requires the same area; 'apartment' also requires the same free-text apartment name. */
-function addressMatches(scope: 'area' | 'apartment', viewer: OwnerAddress, owner: OwnerAddress): boolean {
-  if (!viewer || !owner || viewer.areaId !== owner.areaId) return false;
-  if (scope === 'area') return true;
-  const a = viewer.apartment?.trim().toLowerCase();
-  const b = owner.apartment?.trim().toLowerCase();
-  return !!a && !!b && a === b;
-}
+type OwnerAddress = VisibilityAddress;
 
 /** Public profile view (the "User" frame) — any member viewing another member. */
 export async function getPublicProfile(profileId: number, viewerUserId: number) {
@@ -153,11 +145,9 @@ export async function getPublicProfile(profileId: number, viewerUserId: number) 
   }
   const ownerAddress: OwnerAddress = profile.address ? { areaId: profile.address.areaId, apartment: profile.address.apartment } : null;
 
-  const profileVisible =
-    isOwner ||
-    profileVisibility === 'all' ||
-    (profileVisibility !== 'only_me' && addressMatches(profileVisibility as 'area' | 'apartment', viewerAddress, ownerAddress));
-  if (!profileVisible) throw ApiError.forbidden('This profile is not visible to you.');
+  if (!profileVisibleTo(profileVisibility, viewerAddress, ownerAddress, isOwner)) {
+    throw ApiError.forbidden('This profile is private');
+  }
 
   let contactVisible =
     isOwner ||
@@ -173,6 +163,13 @@ export async function getPublicProfile(profileId: number, viewerUserId: number) 
     creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
     _count: { select: { attendees: true } },
   };
+
+  // Whether the viewer has blocked this member (drives Block/Unblock and hides Message).
+  const viewerBlock = isOwner
+    ? null
+    : await prisma.blockedUser.findUnique({
+        where: { blockerId_blockedId: { blockerId: viewerUserId, blockedId: userId } },
+      });
 
   const [hosted, attending, posts, adminGroups, memberGroups, servicesContacted] = await Promise.all([
     prisma.event.findMany({ where: { creatorId: userId, isActive: true }, orderBy: { date: 'desc' }, take: 10, include: eventInclude }),
@@ -217,6 +214,7 @@ export async function getPublicProfile(profileId: number, viewerUserId: number) 
     posts,
     groups,
     servicesContacted,
+    isBlocked: !!viewerBlock,
   };
 }
 

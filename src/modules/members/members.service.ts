@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { visibleProfileWhere } from '../../lib/profileVisibility.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
 import {
   addressScopeFilter,
@@ -23,21 +24,8 @@ export function visibleMembersWhere(
   viewer: ScopeContext,
   scopeFilter: Record<string, unknown>,
 ): Prisma.ProfileWhereInput {
-  const visibility: Prisma.ProfileWhereInput[] = [
-    { privacy: { is: null } }, // never changed their settings: default is everyone
-    { privacy: { is: { profileVisibility: 'all' } } },
-  ];
-  if (viewer.areaId) {
-    visibility.push({ privacy: { is: { profileVisibility: 'area' } }, address: { areaId: viewer.areaId } });
-    if (viewer.apartment) {
-      visibility.push({
-        privacy: { is: { profileVisibility: 'apartment' } },
-        address: { areaId: viewer.areaId, apartment: { equals: viewer.apartment, mode: 'insensitive' } },
-      });
-    }
-  }
   return {
-    AND: [Object.keys(scopeFilter).length ? { address: scopeFilter } : {}, { OR: visibility }],
+    AND: [Object.keys(scopeFilter).length ? { address: scopeFilter } : {}, visibleProfileWhere(viewer)],
     userId: { not: viewerId },
     user: {
       isActive: true,

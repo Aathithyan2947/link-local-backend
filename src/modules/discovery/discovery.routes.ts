@@ -13,6 +13,11 @@ const listQuery = paginationSchema.extend({
   areaId: z.coerce.number().int().optional(),
 });
 const spListQuery = listQuery.extend({ subcategoryId: z.coerce.number().int().optional() });
+/** My Groups → "Groups near you": `excludeMine` leaves out groups the caller created, joined
+ *  or is waiting to be approved for. */
+const groupListQuery = listQuery.extend({
+  excludeMine: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+});
 const ratingSchema = z.object({
   rating: z.coerce.number().int().min(1).max(5),
   review: z.string().max(1000).optional(),
@@ -147,9 +152,9 @@ export const groupsRouter = Router();
 groupsRouter.get(
   '/',
   authenticate('user'),
-  validate({ query: listQuery }),
+  validate({ query: groupListQuery }),
   asyncHandler(async (req, res) => {
-    const q = getValidatedQuery<z.infer<typeof listQuery>>(req);
+    const q = getValidatedQuery<z.infer<typeof groupListQuery>>(req);
     const { items, meta } = await service.listGroups(req.auth!.sub, q);
     paginated(res, items, meta);
   }),

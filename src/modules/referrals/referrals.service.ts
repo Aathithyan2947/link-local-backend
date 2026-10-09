@@ -36,7 +36,11 @@ export async function myReferrals(userId: number) {
     dailyLimit: DAILY_REFERRAL_LIMIT,
     dailySent: cap?.referralsSent ?? 0,
     referred: referred.map((r) => ({
-      name: r.referredName ?? r.referredUser?.profile?.name ?? 'Member',
+      // `name` stays a ready-to-show label for older app builds; newer ones use the parts.
+      name: r.referredName ?? r.referredUser?.profile?.name ?? r.referredPhone ?? 'Member',
+      invitedName: r.referredName,
+      phone: r.referredPhone, // the number the member typed (never a sign-up's own number)
+      profileName: r.referredUser?.profile?.name ?? null,
       status: r.status,
       createdAt: r.createdAt,
       registeredAt: r.registeredAt,
