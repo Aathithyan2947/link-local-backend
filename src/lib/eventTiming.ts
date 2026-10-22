@@ -23,12 +23,36 @@ export function hasEventStarted(event: { date: Date; startTime: Date | null }): 
   return eventStartsAt(event.date, event.startTime) <= new Date();
 }
 
+/**
+ * When an event is over: its start plus its duration, or the end of its day (India time) when
+ * it has no start time or no duration. Until then a started event is "ongoing" (BUG-101/102).
+ */
+export function eventEndsAt(date: Date, startTime: Date | null, durationMinutes?: number | null): Date {
+  if (startTime && durationMinutes) {
+    return new Date(eventStartsAt(date, startTime).getTime() + durationMinutes * 60_000);
+  }
+  const nextDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1));
+  return new Date(eventStartsAt(nextDay, null).getTime() - 1);
+}
+
+export function hasEventEnded(event: { date: Date; startTime: Date | null; durationMinutes?: number | null }): boolean {
+  return eventEndsAt(event.date, event.startTime, event.durationMinutes) <= new Date();
+}
+
+/** Today's date in India, as the UTC midnight an `@db.Date` column compares against. */
+export function todayInIndia(): Date {
+  const now = new Date(Date.now() + EVENT_UTC_OFFSET_MINUTES * 60_000);
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
 /** The viewer's relationship to one event, as every event list reports it. */
 export interface ViewerEventState {
   /** joined | pending_approval | null (not attending, or withdrawn). */
   myStatus: string | null;
   isHost: boolean;
   hasStarted: boolean;
+  /** Over (see eventEndsAt): My Events lists it under Past, marked Closed. */
+  hasEnded: boolean;
 }
 
 /**
@@ -36,7 +60,7 @@ export interface ViewerEventState {
  * Hosting / Closed without opening the event. One attendee query for the whole list.
  */
 export async function withViewerEventState<
-  T extends { id: number; creatorId: number; date: Date; startTime: Date | null },
+  T extends { id: number; creatorId: number; date: Date; startTime: Date | null; durationMinutes?: number | null },
 >(events: T[], viewerId: number): Promise<(T & ViewerEventState)[]> {
   const rows = events.length
     ? await prisma.eventAttendee.findMany({
@@ -52,6 +76,7 @@ export async function withViewerEventState<
       myStatus: status === 'joined' || status === 'pending_approval' ? status : null,
       isHost: e.creatorId === viewerId,
       hasStarted: hasEventStarted(e),
+      hasEnded: hasEventEnded(e),
     };
   });
 }

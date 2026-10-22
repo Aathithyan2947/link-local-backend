@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PROFILE_LIMITS } from '../profiles/profiles.schema.js';
 
 // Strong password policy: 8+ chars with at least one uppercase, one lowercase, one number
 // and one special character.
@@ -13,9 +14,20 @@ const passwordField = z
 
 const emailField = z.string().email('Please enter a valid email address');
 
+// Sign-up name: letters in any language plus spaces and . ' - (no digits or symbols),
+// 2–100 characters (the profile name limit). The app's name_rules.dart uses the same rule
+// and messages, shown under the field.
+const nameField = z
+  .string()
+  .trim()
+  .min(1, 'Enter your name')
+  .min(2, 'Name must be at least 2 characters')
+  .max(PROFILE_LIMITS.name, `Name can be at most ${PROFILE_LIMITS.name} characters`)
+  .regex(/^[\p{L}\p{M}][\p{L}\p{M} .'-]*$/u, "Name can only contain letters, spaces and . ' -");
+
 export const registerSchema = z
   .object({
-    name: z.string().min(1).max(120),
+    name: nameField,
     email: emailField.optional(),
     mobile: z
       .string()
@@ -53,7 +65,7 @@ export const otpRequestSchema = z
     mobile: mobileField.optional(),
     email: emailField.optional(),
     purpose: z.enum(['registration', 'login']).default('registration'),
-    name: z.string().min(1).max(100).optional(),
+    name: nameField.optional(),
     userType: z.enum(['resident', 'service_provider', 'business_listing']).optional(),
   })
   .refine((d) => d.mobile || d.email, { message: 'mobile or email required', path: ['mobile'] });
@@ -64,7 +76,7 @@ export const otpVerifySchema = z
     email: emailField.optional(),
     otp: z.string().length(6),
     purpose: z.enum(['registration', 'login']).default('registration'),
-    name: z.string().min(1).max(100).optional(),
+    name: nameField.optional(),
     userType: z.enum(['resident', 'service_provider', 'business_listing']).default('resident'),
     referralCode: z.string().optional(),
     referralSourceId: z.coerce.number().int().optional(),

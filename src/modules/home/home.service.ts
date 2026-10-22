@@ -1,7 +1,8 @@
 import { prisma } from '../../lib/prisma.js';
 import { visibleProfileWhere } from '../../lib/profileVisibility.js';
 import { providerLocationInclude, viewerCoords, withPublicLocation } from '../../lib/providerLocation.js';
-import { withViewerEventState } from '../../lib/eventTiming.js';
+import { todayInIndia, withViewerEventState } from '../../lib/eventTiming.js';
+import { eventRatingMap, spRatingMap } from '../../lib/ratings.js';
 import { visibleMembersWhere } from '../members/members.service.js';
 import { POINTS_PER_REFERRAL } from '../referrals/referrals.service.js';
 // Circular with feed.service, which imports this module's scope helpers — safe because both
@@ -217,7 +218,8 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
         take: 3,
         include: {
           user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
-          _count: { select: { likes: true, comments: true } },
+          // `shares` too, so the card's share count matches the feed's.
+          _count: { select: { likes: true, comments: true, shares: true } },
           media: { take: 1, orderBy: { sortOrder: 'asc' } },
         },
       }),
@@ -225,13 +227,19 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
         where: { isActive: true, ...cityWhere },
         orderBy: { createdAt: 'desc' },
         take: 6,
-        include: { _count: { select: { members: true } } },
+        // Joined members only — the group page and Discover count the same way.
+        include: { _count: { select: { members: { where: { status: 'joined' } } } } },
       }),
       prisma.event.findMany({
-        where: { isActive: true, ...cityWhere },
-        orderBy: { date: 'asc' },
+        // From today on, soonest first: past events used to fill the row, oldest first.
+        where: { isActive: true, date: { gte: todayInIndia() }, ...cityWhere },
+        orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
         take: 6,
-        include: { _count: { select: { attendees: true } } },
+        include: {
+          // The workshop card's "By: <name>" line.
+          creator: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
+          _count: { select: { attendees: true } },
+        },
       }),
       prisma.profile.findMany({
         where: { user: { id: { not: userId }, userType: 'service_provider', isActive: true }, ...spCityWhere },
@@ -247,7 +255,7 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
         },
       }),
       prisma.interestGroup.count({ where: { isActive: true, ...cityWhere } }),
-      prisma.event.count({ where: { isActive: true, ...cityWhere } }),
+      prisma.event.count({ where: { isActive: true, date: { gte: todayInIndia() }, ...cityWhere } }),
       prisma.profile.count({
         where: { user: { id: { not: userId }, userType: 'service_provider', isActive: true }, ...spCityWhere },
       }),
@@ -256,6 +264,13 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
       countByScope(userId, ctx, overrideAreaId),
       countByService(userId, spCityWhere),
     ]);
+
+  // Same rating lookups the Discover lists use, so a card shows the same stars on both.
+  const [workshopRatings, spRatings, workshopsWithState] = await Promise.all([
+    eventRatingMap(workshops.map((e) => e.id)),
+    spRatingMap(serviceProviders.map((p) => p.id)),
+    withViewerEventState(workshops, userId),
+  ]);
 
   return {
     city,
@@ -269,10 +284,22 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
     scopeLabel: await scopeLabel(scope, ctx, overrideAreaId, city?.name ?? null),
     discussions: await decorateDiscussions(discussions, userId),
     groups: { total: groupCount, items: groups },
-    workshops: { total: workshopCount, items: await withViewerEventState(workshops, userId) },
+    workshops: {
+      total: workshopCount,
+      // Today's events that have already finished drop out too.
+      items: workshopsWithState.filter((e) => !e.hasEnded).map((e) => ({
+        ...e,
+        ratingAvg: workshopRatings.get(e.id)?.avg ?? null,
+        ratingCount: workshopRatings.get(e.id)?.count ?? 0,
+      })),
+    },
     serviceProviders: {
       total: spCount,
-      items: serviceProviders.map((p) => withPublicLocation(p, viewer)),
+      items: serviceProviders.map((p) => ({
+        ...withPublicLocation(p, viewer),
+        ratingAvg: spRatings.get(p.id)?.avg ?? null,
+        ratingCount: spRatings.get(p.id)?.count ?? p._count.ratings,
+      })),
       services: spServices,
     },
     scopeCounts,

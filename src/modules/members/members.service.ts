@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { visibleProfileWhere } from '../../lib/profileVisibility.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
+import { localityName } from '../../lib/providerLocation.js';
 import {
   addressScopeFilter,
   type HomeScope,
@@ -69,7 +70,7 @@ export async function listMembers(
         name: true,
         photoUrl: true,
         user: { select: { userType: true } },
-        address: { select: { area: { select: { areaName: true } } } },
+        address: { select: { lane2: true, area: { select: { areaName: true } } } },
         serviceTypes: { take: 1, select: { subcategory: { select: { name: true } } } },
         professions: { take: 1, select: { professionMaster: { select: { category: true } } } },
       },
@@ -89,7 +90,8 @@ export async function listMembers(
       roleLabel: isServiceProvider
         ? (r.serviceTypes[0]?.subcategory.name ?? null)
         : (r.professions[0]?.professionMaster?.category ?? null),
-      areaName: r.address?.area?.areaName ?? null,
+      // The neighbourhood, same rule as provider cards and profiles (localityName).
+      areaName: localityName(r.address),
     };
   });
   return { items, meta: buildMeta(params.page, params.pageSize, total) };

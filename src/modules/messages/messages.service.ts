@@ -51,6 +51,12 @@ export async function sendMessage(senderId: number, data: SendMessageInput) {
     if (!data.entityId) throw ApiError.badRequest('Which post?');
     await assertCanSharePost(data.entityId, senderId);
   }
+  // A shared event must still be listed (BUG-100: events share into chats like posts).
+  if (data.entityType === 'event') {
+    if (!data.entityId) throw ApiError.badRequest('Which event?');
+    const event = await prisma.event.findUnique({ where: { id: data.entityId }, select: { isActive: true } });
+    if (!event?.isActive) throw ApiError.notFound('This event is no longer available');
+  }
 
   const message = await prisma.message.create({
     data: {
@@ -121,14 +127,52 @@ export async function getThread(userId: number, otherUserId: number) {
     where: { conversationId, receiverId: userId, isRead: false },
     data: { isRead: true },
   });
-  // Shared posts come with what the chat shows of them, in one query.
-  const previews = await postPreviews(
-    messages.filter((m) => m.entityType === 'post' && m.entityId != null).map((m) => m.entityId!),
+  // Shared posts and events come with what the chat shows of them, one query each.
+  const idsOf = (type: string) => messages.filter((m) => m.entityType === type && m.entityId != null).map((m) => m.entityId!);
+  const [posts, events] = await Promise.all([postPreviews(idsOf('post')), eventPreviews(idsOf('event'))]);
+  const withPreviews = messages.map((m) => {
+    if (m.entityId == null) return m;
+    if (m.entityType === 'post') return { ...m, post: posts.get(m.entityId) ?? null };
+    if (m.entityType === 'event') return { ...m, event: events.get(m.entityId) ?? null };
+    return m;
+  });
+  return { other, messages: withPreviews, ...block };
+}
+
+/** What a chat shows of a shared event: enough for a card that opens it. A removed event stays
+ *  in the map with `isActive: false`, so the chat can say it's gone. */
+async function eventPreviews(eventIds: number[]) {
+  if (eventIds.length === 0) return new Map<number, never>();
+  const events = await prisma.event.findMany({
+    where: { id: { in: [...new Set(eventIds)] } },
+    select: {
+      id: true,
+      title: true,
+      date: true,
+      startTime: true,
+      mode: true,
+      location: true,
+      photoUrl: true,
+      isActive: true,
+      creator: { select: { profile: { select: { name: true } } } },
+    },
+  });
+  return new Map(
+    events.map((e) => [
+      e.id,
+      {
+        id: e.id,
+        title: e.title,
+        date: e.date,
+        startTime: e.startTime,
+        mode: e.mode,
+        location: e.location,
+        photoUrl: e.photoUrl,
+        isActive: e.isActive,
+        hostName: e.creator.profile?.name ?? 'Member',
+      },
+    ]),
   );
-  const withPosts = messages.map((m) =>
-    m.entityType === 'post' && m.entityId != null ? { ...m, post: previews.get(m.entityId) ?? null } : m,
-  );
-  return { other, messages: withPosts, ...block };
 }
 
 export async function unreadCount(userId: number) {

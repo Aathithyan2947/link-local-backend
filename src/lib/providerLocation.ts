@@ -18,10 +18,24 @@ export const providerLocationInclude = {
     select: {
       latitude: true,
       longitude: true,
+      lane2: true,
       area: { select: { areaName: true, city: { select: { name: true } } } },
     },
   },
 } as const;
+
+/**
+ * The neighbourhood an address is in, for anyone but its owner to see. That's Lane 2 — where
+ * both the address directory and Google's place search put the locality (Anand Nagar,
+ * Kasarvadavali…) — falling back to the area. The area alone is often just the corridor road:
+ * every complex in the seeded Thane directory is filed under "Ghodbunder Road", so everyone
+ * there read as "Ghodbunder Road, Mumbai".
+ */
+export function localityName(
+  address: { lane2?: string | null; area: { areaName: string } | null } | null | undefined,
+): string | null {
+  return address?.lane2?.trim() || address?.area?.areaName || null;
+}
 
 type Coords = { latitude: number; longitude: number };
 
@@ -29,6 +43,7 @@ type WithAddress = {
   address: {
     latitude: unknown;
     longitude: unknown;
+    lane2?: string | null;
     area: { areaName: string; city: { name: string } } | null;
   } | null;
 };
@@ -67,9 +82,25 @@ export function withPublicLocation<T extends WithAddress>(
   const at = coordsOf(address);
   return {
     ...rest,
-    areaName: address?.area?.areaName ?? null,
+    areaName: localityName(address),
     cityName: address?.area?.city.name ?? null,
     distanceLabel:
       viewer && at ? distanceLabel(distanceKm(viewer.latitude, viewer.longitude, at.latitude, at.longitude)) : null,
+  };
+}
+
+/**
+ * All a member other than the owner may see of someone's address on a profile or event page:
+ * the neighbourhood (see localityName) and city — what the app shows. The full address — flat,
+ * building, street, coordinates — stays with its owner.
+ */
+export function areaAndCityOnly(
+  address: { lane2?: string | null; area: { areaName: string; city: { name: string } } | null } | null | undefined,
+) {
+  if (!address) return null;
+  return {
+    area: address.area
+      ? { areaName: localityName(address) ?? address.area.areaName, city: { name: address.area.city.name } }
+      : null,
   };
 }

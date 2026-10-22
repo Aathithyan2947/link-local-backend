@@ -1,5 +1,6 @@
 import { prisma } from '../../lib/prisma.js';
 import { addressMatches, profileVisibleTo, type VisibilityAddress } from '../../lib/profileVisibility.js';
+import { areaAndCityOnly } from '../../lib/providerLocation.js';
 import { withViewerEventState } from '../../lib/eventTiming.js';
 import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
@@ -203,12 +204,18 @@ export async function getPublicProfile(profileId: number, viewerUserId: number) 
     ...memberGroups.filter((m) => !adminGroupIds.has(m.groupId)).map((m) => ({ ...m.group, role: 'member' as const })),
   ];
 
+  // The published contact is the member's public number/email (profile Mobile/Email edit
+  // these), falling back to the sign-in ones — same rule as a provider's publishedPhone.
+  // The raw service* columns are stripped so Contact Visibility can't be bypassed.
+  const { servicePhone, serviceEmail, ...publicProfile } = profile;
   return {
-    ...profile,
+    ...publicProfile,
+    address: isOwner ? publicProfile.address : areaAndCityOnly(publicProfile.address),
+    ...(isOwner ? { servicePhone, serviceEmail } : {}),
     user: {
       ...profile.user,
-      mobile: contactVisible ? profile.user.mobile : null,
-      email: contactVisible ? profile.user.email : null,
+      mobile: contactVisible ? servicePhone?.trim() || profile.user.mobile : null,
+      email: contactVisible ? serviceEmail?.trim() || profile.user.email : null,
     },
     events,
     posts,

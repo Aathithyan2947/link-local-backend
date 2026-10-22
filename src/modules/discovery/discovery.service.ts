@@ -1,7 +1,19 @@
 import { prisma } from '../../lib/prisma.js';
 import { assertProfileVisible, visibleProfileWhere } from '../../lib/profileVisibility.js';
-import { providerLocationInclude, viewerCoords, withPublicLocation } from '../../lib/providerLocation.js';
-import { hasEventStarted, withViewerEventState } from '../../lib/eventTiming.js';
+import {
+  areaAndCityOnly,
+  providerLocationInclude,
+  viewerCoords,
+  withPublicLocation,
+} from '../../lib/providerLocation.js';
+import {
+  eventStartsAt,
+  hasEventEnded,
+  hasEventStarted,
+  todayInIndia,
+  withViewerEventState,
+} from '../../lib/eventTiming.js';
+import { fieldError } from '../../lib/contentLimits.js';
 import { destroyByUrl } from '../../lib/cloudinary.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
@@ -19,6 +31,7 @@ import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
 import { computeOpenSlots } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
 import { getCustomFieldsForProfile } from '../../lib/customFields.js';
+import { round1, eventRatingMap, spRatingMap } from '../../lib/ratings.js';
 
 /** Open, bookable slots for an SP (for the resident's schedule view + checkout). */
 export async function getServiceProviderSlots(id: number, from?: string, days?: number) {
@@ -63,38 +76,10 @@ export interface CreateEventInput {
   rawMaterials?: string[];
 }
 
-/** Rounds an average to one decimal, or null when there are no ratings. */
-const round1 = (avg: number | null | undefined) =>
-  avg == null ? null : Math.round(avg * 10) / 10;
-
-/** Builds an { eventId → { avg, count } } lookup for event ratings. */
-async function eventRatingMap(eventIds: number[]) {
-  if (eventIds.length === 0) return new Map<number, { avg: number | null; count: number }>();
-  const groups = await prisma.eventRating.groupBy({
-    by: ['eventId'],
-    where: { eventId: { in: eventIds }, rating: { not: null } },
-    _avg: { rating: true },
-    _count: { rating: true },
-  });
-  return new Map(groups.map((g) => [g.eventId, { avg: round1(g._avg.rating), count: g._count.rating }]));
-}
-
-/** Builds a { profileId → { avg, count } } lookup for service-provider ratings. */
-async function spRatingMap(profileIds: number[]) {
-  if (profileIds.length === 0) return new Map<number, { avg: number | null; count: number }>();
-  const groups = await prisma.serviceProviderRating.groupBy({
-    by: ['profileId'],
-    where: { profileId: { in: profileIds } },
-    _avg: { rating: true },
-    _count: { rating: true },
-  });
-  return new Map(groups.map((g) => [g.profileId, { avg: round1(g._avg.rating), count: g._count.rating }]));
-}
-
 // ── Events / Workshops ───────────────────────────────────────
 export async function listEvents(
   userId: number,
-  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number },
+  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number; upcoming?: boolean },
 ) {
   const ctx = await resolveUserScopeContext(userId);
   const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
@@ -103,6 +88,8 @@ export async function listEvents(
   const where: Record<string, unknown> = {
     isActive: true,
     ...(hasFilter ? { creator: { profile: { address: addressFilter } } } : {}),
+    // `upcoming`: today onwards (My Events → Events near you), instead of oldest-first history.
+    ...(params.upcoming ? { date: { gte: todayInIndia() } } : {}),
   };
   if (params.q) where.title = { contains: params.q, mode: 'insensitive' };
 
@@ -190,14 +177,25 @@ export async function getEvent(id: number, viewerId?: number) {
   }
 
   const isHost = viewerId != null && event.creatorId === viewerId;
+  // The host's own address goes to the host only; everyone else gets the neighbourhood and
+  // city. It used to send the host's full home address to every viewer.
+  const creatorProfile = event.creator.profile;
+  const creator = creatorProfile
+    ? {
+        ...event.creator,
+        profile: { ...creatorProfile, address: isHost ? creatorProfile.address : areaAndCityOnly(creatorProfile.address) },
+      }
+    : event.creator;
   return {
     ...event,
+    creator,
     ratingAvg: agg._avg.rating != null ? Math.round(agg._avg.rating * 10) / 10 : null,
     ratingCount: agg._count.rating,
     myAttendance,
     // Decided here so the app never needs its own copy of the review rules.
     isHost,
     hasStarted: hasEventStarted(event),
+    hasEnded: hasEventEnded(event),
     canReview: viewerId != null && eventReviewBlocker(event, viewerId, myAttendance) === null,
     canJoin: !isHost && !hasEventStarted(event) && myAttendance?.status !== 'joined',
   };
@@ -205,15 +203,32 @@ export async function getEvent(id: number, viewerId?: number) {
 
 // ── Events lifecycle (create / join / withdraw / pay / rate) ──
 
+/** Most an event can be scheduled ahead — the app's date picker offers the next 365 days. */
+const MAX_EVENT_LEAD_MS = 366 * 24 * 60 * 60 * 1000;
+
+/** A new (or rescheduled) event must start in the future, and within the next year. */
+function assertSchedulable(date: Date, startTime: Date | null) {
+  const startsAt = eventStartsAt(date, startTime);
+  if (startsAt <= new Date()) {
+    throw ApiError.badRequest('Start time must be in the future', fieldError('startTime', 'Start time must be in the future'));
+  }
+  if (startsAt.getTime() - Date.now() > MAX_EVENT_LEAD_MS) {
+    throw ApiError.badRequest('Pick a date within the next year', fieldError('date', 'Pick a date within the next year'));
+  }
+}
+
 export async function createEvent(userId: number, data: CreateEventInput) {
+  const date = parseDate(data.date) ?? new Date();
+  const startTime = parseDate(data.startTime);
+  assertSchedulable(date, startTime);
   const event = await prisma.event.create({
     data: {
       creatorId: userId,
       title: data.title,
       description: data.description,
       photoUrl: data.photoUrl,
-      date: parseDate(data.date) ?? new Date(),
-      startTime: parseDate(data.startTime),
+      date,
+      startTime,
       durationMinutes: data.durationMinutes,
       mode: data.mode,
       location: data.location,
@@ -240,9 +255,27 @@ export async function createEvent(userId: number, data: CreateEventInput) {
 }
 
 export async function updateEvent(eventId: number, userId: number, data: Partial<CreateEventInput>) {
-  const event = await prisma.event.findUnique({ where: { id: eventId }, select: { creatorId: true, photoUrl: true } });
+  const event = await prisma.event.findUnique({
+    where: { id: eventId },
+    select: { creatorId: true, photoUrl: true, date: true, startTime: true },
+  });
   if (!event) throw ApiError.notFound('Event not found');
   if (event.creatorId !== userId) throw ApiError.forbidden('Only the host can edit this event');
+
+  // Only a reschedule has to be in the future — editing the description of an event that has
+  // already started must still work.
+  const nextDate = data.date ? parseDate(data.date) ?? event.date : event.date;
+  const nextStart = data.startTime !== undefined ? parseDate(data.startTime) : event.startTime;
+  if (eventStartsAt(nextDate, nextStart).getTime() !== eventStartsAt(event.date, event.startTime).getTime()) {
+    assertSchedulable(nextDate, nextStart);
+  }
+  if (data.maxAttendees != null) {
+    const joined = await prisma.eventAttendee.count({ where: { eventId, status: 'joined' } });
+    if (data.maxAttendees < joined) {
+      const msg = `Max attendees can't be less than the ${joined} people already joined`;
+      throw ApiError.badRequest(msg, fieldError('maxAttendees', msg));
+    }
+  }
 
   const updated = await prisma.event.update({
     where: { id: eventId },
@@ -666,6 +699,13 @@ export async function updateGroup(groupId: number, userId: number, data: Partial
   const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true, photoUrl: true } });
   if (!group) throw ApiError.notFound('Group not found');
   if (group.creatorId !== userId) throw ApiError.forbidden('Only the creator can edit this group');
+  if (data.maxMembers != null) {
+    const joined = await prisma.interestGroupMember.count({ where: { groupId, status: 'joined' } });
+    if (data.maxMembers < joined) {
+      const msg = `Max members can't be less than the current ${joined} members`;
+      throw ApiError.badRequest(msg, fieldError('maxMembers', msg));
+    }
+  }
   const updated = await prisma.interestGroup.update({
     where: { id: groupId },
     data: {
@@ -1051,6 +1091,8 @@ export async function getServiceProvider(id: number, callerId?: number) {
 
   return {
     ...sp,
+    // The owner's page shows their own address; anyone else gets the area and city only.
+    address: isOwner ? sp.address : areaAndCityOnly(sp.address),
     servicePhone: isOwner ? sp.servicePhone : null,
     serviceEmail: isOwner ? sp.serviceEmail : null,
     publishedPhone: mobileVisible ? publishedPhone : null,

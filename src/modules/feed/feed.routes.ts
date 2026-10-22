@@ -6,6 +6,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok, paginated } from '../../utils/http.js';
 import { paginationSchema } from '../../utils/pagination.js';
 import * as service from './feed.service.js';
+import { postTextField } from '../../lib/contentLimits.js';
 
 export const feedRouter = Router();
 
@@ -19,7 +20,8 @@ const listQuery = paginationSchema.extend({
 
 const createPostSchema = z.object({
   postType: z.enum(['buy_sell', 'ask_help', 'offer_help', 'share_update']),
-  textContent: z.string().max(5000).optional(),
+  // 2000, with the app's message (BUG-070).
+  textContent: postTextField.optional(),
   media: z
     .array(z.object({ mediaType: z.enum(['photo', 'video']), url: z.string().url() }))
     .optional(),
