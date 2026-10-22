@@ -151,8 +151,13 @@ export async function setMemberStatus(userId: number, patch: { isActive?: boolea
 }
 
 // ── Profile verification queue ───────────────────────────────
+// Pending = unverified members who haven't been decided yet, so approving OR rejecting removes
+// them from the queue. Shared with the dashboard's "Pending Verifications" card so the card
+// always equals the tab's total.
+const pendingVerificationWhere = { isVerified: false, profileVerifications: { none: {} } };
+
 export async function listVerifications(params: PaginationParams & { status?: string }) {
-  const where: Record<string, unknown> = {};
+  let where: Record<string, unknown> = {};
   if (params.status === 'verified') {
     where.isVerified = true;
   } else if (params.status === 'rejected') {
@@ -160,10 +165,7 @@ export async function listVerifications(params: PaginationParams & { status?: st
     where.isVerified = false;
     where.profileVerifications = { some: { status: 'rejected' } };
   } else {
-    // pending (default): unverified members who haven't been decided yet, so approving OR
-    // rejecting removes them from this queue.
-    where.isVerified = false;
-    where.profileVerifications = { none: {} };
+    where = { ...pendingVerificationWhere };
   }
 
   const [rows, total] = await Promise.all([
@@ -391,7 +393,9 @@ export async function getDashboard() {
       prisma.interestGroup.count(),
       prisma.post.count(),
       prisma.addressVerificationDoc.count({ where: { status: 'pending' } }),
-      prisma.profileVerification.count({ where: { status: 'pending' } }),
+      // Same rule as the Verifications "Pending" tab. (No ProfileVerification row is ever
+      // written as 'pending', so counting those always gave 0.)
+      prisma.user.count({ where: pendingVerificationWhere }),
     ]);
 
   return {

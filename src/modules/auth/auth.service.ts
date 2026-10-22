@@ -21,6 +21,11 @@ function issueTokens(payload: TokenPayload) {
   };
 }
 
+/** Admin-blocked or deactivated accounts can't sign in, by any method, or refresh a session. */
+function assertAccountEnabled(account: { isActive: boolean; isBlocked?: boolean }) {
+  if (!account.isActive || account.isBlocked) throw ApiError.forbidden('Account is disabled');
+}
+
 function generateReferralCode(name: string): string {
   const prefix = name.replace(/[^a-zA-Z]/g, '').slice(0, 4).toUpperCase() || 'USER';
   return `${prefix}${randomBytes(3).toString('hex').toUpperCase()}`;
@@ -87,7 +92,7 @@ export async function login(input: LoginInput) {
     where: { OR: [{ email: identifier }, { mobile: identifier }] },
   });
   if (!user || !user.passwordHash) throw ApiError.unauthorized('Invalid credentials');
-  if (!user.isActive || user.isBlocked) throw ApiError.forbidden('Account is disabled');
+  assertAccountEnabled(user);
 
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) throw ApiError.unauthorized('Invalid credentials');
@@ -136,6 +141,28 @@ export async function adminLogin(input: AdminLoginInput) {
   return { admin: safe, ...issueTokens(payload) };
 }
 
+/**
+ * Issues a new access token for an already-verified refresh token. Re-reads the account so a
+ * block or deactivation ends the session at the next refresh (access tokens last 15 min), and
+ * signs the current userType/role rather than the ones copied into the refresh token at login.
+ */
+export async function refreshAccessToken(payload: TokenPayload) {
+  if (payload.principal === 'admin') {
+    const admin = await prisma.admin.findUnique({ where: { id: payload.sub }, select: { isActive: true, role: true } });
+    if (!admin) throw ApiError.unauthorized('Invalid refresh token');
+    assertAccountEnabled(admin);
+    return { accessToken: signAccessToken({ sub: payload.sub, principal: 'admin', role: admin.role ?? undefined }) };
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: payload.sub },
+    select: { isActive: true, isBlocked: true, userType: true },
+  });
+  if (!user) throw ApiError.unauthorized('Invalid refresh token');
+  assertAccountEnabled(user);
+  return { accessToken: signAccessToken({ sub: payload.sub, principal: 'user', userType: user.userType }) };
+}
+
 // ── OTP (dev mode) ───────────────────────────────────────────
 function genOtp(): string {
   return randomInt(100000, 1000000).toString();
@@ -150,6 +177,8 @@ export async function requestOtp(input: OtpRequestInput) {
   if (purpose === 'login' && !existing) {
     throw ApiError.notFound('No account found. Please sign up first.');
   }
+  // Say so before sending a code; verifyOtp checks again, since that's what issues tokens.
+  if (purpose === 'login' && existing) assertAccountEnabled(existing);
   // Registering with an already-used mobile/email must NOT silently log into the existing
   // account (which would ignore the new name). Stop here and ask them to log in instead.
   if (purpose === 'registration' && existing) {
@@ -206,6 +235,7 @@ export async function verifyOtp(input: OtpVerifyInput) {
       `An account with this ${mobile ? 'mobile number' : 'email'} already exists. Please log in.`,
     );
   }
+  if (user) assertAccountEnabled(user);
 
   if (!user) {
     if (purpose === 'login') throw ApiError.notFound('No account found');

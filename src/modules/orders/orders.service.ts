@@ -552,29 +552,46 @@ export async function payOrder(
   });
   if (!order) throw ApiError.notFound('Order not found');
   if (order.buyerId !== buyerId) throw ApiError.forbidden('Not your order');
+  if (order.status === 'cancelled' || order.status === 'rejected') {
+    throw ApiError.badRequest(`This order was ${order.status}, so it can't be paid`);
+  }
   // A booking must be accepted by the SP before the resident can pay.
   if (order.orderKind === 'booking' && order.status !== 'accepted') {
     throw ApiError.badRequest('This booking is not ready for payment yet');
   }
 
   const amount = await computeAmountDue(order);
-  const charge = mockCharge(amount); // MOCK gateway
-  const payment = await prisma.orderPayment.create({
-    data: {
-      orderId,
-      amount,
-      paymentType: opts.paymentType ?? 'advance',
-      paymentMethod: opts.paymentMethod ?? 'upi',
-      paymentSubMethod: opts.paymentSubMethod,
-      paymentStatus: 'paid',
-      transactionRef: charge.transactionRef,
-      paidAt: charge.paidAt,
-    },
+  // One payment per order (the app only ever sends `advance`, and nothing sets up balance
+  // payments yet). The check and the insert run under a row lock on the order, so two requests
+  // arriving together — e.g. the app's timeout retry re-sending the POST on a slow cold start —
+  // can't both get past it.
+  const payment = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} FOR UPDATE`;
+    const alreadyPaid = await tx.orderPayment.findFirst({
+      where: { orderId, paymentStatus: 'paid' },
+      select: { id: true },
+    });
+    if (alreadyPaid) throw ApiError.conflict('This order is already paid');
+
+    const charge = mockCharge(amount); // MOCK gateway
+    const created = await tx.orderPayment.create({
+      data: {
+        orderId,
+        amount,
+        paymentType: opts.paymentType ?? 'advance',
+        paymentMethod: opts.paymentMethod ?? 'upi',
+        paymentSubMethod: opts.paymentSubMethod,
+        paymentStatus: 'paid',
+        transactionRef: charge.transactionRef,
+        paidAt: charge.paidAt,
+      },
+    });
+    // Paying a booking confirms it.
+    if (order.orderKind === 'booking' && order.status === 'accepted') {
+      await tx.order.update({ where: { id: orderId }, data: { status: 'confirmed', confirmedAt: new Date() } });
+    }
+    return created;
   });
-  // Paying a booking confirms it.
-  if (order.orderKind === 'booking' && order.status === 'accepted') {
-    await prisma.order.update({ where: { id: orderId }, data: { status: 'confirmed', confirmedAt: new Date() } });
-  }
   await bumpUserStats(order.spProfile.userId, { paymentReceivedTotal: amount });
   await emitNotification({
     userId: order.spProfile.userId,

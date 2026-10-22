@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { verifyRefreshToken, signAccessToken } from '../../utils/jwt.js';
+import { verifyRefreshToken, type TokenPayload } from '../../utils/jwt.js';
 import * as authService from './auth.service.js';
 
 export const register = asyncHandler(async (req: Request, res: Response) => {
@@ -34,16 +34,12 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const refresh = asyncHandler(async (req: Request, res: Response) => {
+  let payload: TokenPayload;
   try {
-    const payload = verifyRefreshToken(req.body.refreshToken);
-    const accessToken = signAccessToken({
-      sub: payload.sub,
-      principal: payload.principal,
-      userType: payload.userType,
-      role: payload.role,
-    });
-    ok(res, { accessToken });
+    payload = verifyRefreshToken(req.body.refreshToken);
   } catch {
     throw ApiError.unauthorized('Invalid refresh token');
   }
+  // Outside the try: a disabled account must surface as its own 403, not "Invalid refresh token".
+  ok(res, await authService.refreshAccessToken(payload));
 });

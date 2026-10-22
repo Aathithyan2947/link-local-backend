@@ -34,7 +34,7 @@ interface CrudOptions {
   filterFields?: string[];
   defaultOrderBy?: any;
   include?: any;
-  /** When true, listing is public; otherwise it requires an authenticated principal. */
+  /** When true, listing is public; otherwise it requires an admin token (any role). */
   publicRead?: boolean;
   /** Runs after a row is created (e.g. seed default child rows for a new city). */
   afterCreate?: (item: any) => Promise<void> | void;
@@ -70,7 +70,9 @@ export function crudRouter(opts: CrudOptions): Router {
     return where;
   };
 
-  const readGuard = opts.publicRead ? [] : [authenticate('user', 'admin')];
+  // Non-public masters (coupons, freebies, permissions, profile tags) are admin-only data; a
+  // member token must not list them. Any admin role: ops admins read profile tags on Members.
+  const readGuard = opts.publicRead ? [] : [authenticate('admin')];
 
   // LIST
   router.get(

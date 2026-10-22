@@ -12,8 +12,9 @@ import { ApiError } from '../../utils/ApiError.js';
 
 /**
  * Mounts all admin "master data" tables under /masters.
- * Reads are public (the mobile app needs categories, cities, etc.);
- * writes require an admin token (enforced inside crudRouter).
+ * Reads are public where `publicRead` is set (the mobile app needs categories, cities, etc.);
+ * the rest (coupons, freebies, permissions, profile tags) need an admin token.
+ * Writes require a super admin (enforced inside crudRouter).
  */
 export const mastersRouter = Router();
 

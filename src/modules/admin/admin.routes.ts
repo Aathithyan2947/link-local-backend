@@ -77,7 +77,7 @@ adminRouter.put(
 
 // ── Profile verification queue ───────────────────────────────
 const verificationsQuery = paginationSchema.extend({
-  status: z.enum(['pending', 'verified']).optional(),
+  status: z.enum(['pending', 'rejected', 'verified']).optional(),
 });
 
 adminRouter.get(
