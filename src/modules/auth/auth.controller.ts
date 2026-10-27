@@ -43,3 +43,11 @@ export const refresh = asyncHandler(async (req: Request, res: Response) => {
   // Outside the try: a disabled account must surface as its own 403, not "Invalid refresh token".
   ok(res, await authService.refreshAccessToken(payload));
 });
+
+export const requestPasswordReset = asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await authService.requestPasswordReset(req.body.identifier));
+});
+
+export const resetPassword = asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await authService.resetPassword(req.body));
+});

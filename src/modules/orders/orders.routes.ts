@@ -5,6 +5,7 @@ import { validate } from '../../middleware/validate.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/http.js';
 import * as service from './orders.service.js';
+import { requireAddressProof } from '../../lib/addressProof.js';
 
 export const ordersRouter = Router();
 const auth = authenticate('user');
@@ -75,11 +76,12 @@ const directPaymentSchema = z.object({
   amount: z.coerce.number().positive().max(1_000_000),
 });
 
-ordersRouter.post('/', auth, validate({ body: placeSchema }), asyncHandler(async (req, res) => ok(res, await service.placeOrder(req.auth!.sub, req.body), 201)));
-ordersRouter.post('/bookings', auth, validate({ body: bookingSchema }), asyncHandler(async (req, res) => ok(res, await service.placeBooking(req.auth!.sub, req.body), 201)));
+ordersRouter.post('/', auth, requireAddressProof('place an order'), validate({ body: placeSchema }), asyncHandler(async (req, res) => ok(res, await service.placeOrder(req.auth!.sub, req.body), 201)));
+ordersRouter.post('/bookings', auth, requireAddressProof('book a service'), validate({ body: bookingSchema }), asyncHandler(async (req, res) => ok(res, await service.placeBooking(req.auth!.sub, req.body), 201)));
 ordersRouter.post(
   '/direct-payment',
   auth,
+  requireAddressProof('make a payment'),
   validate({ body: directPaymentSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.createDirectPayment(req.auth!.sub, req.body.spProfileId, req.body.amount), 201),

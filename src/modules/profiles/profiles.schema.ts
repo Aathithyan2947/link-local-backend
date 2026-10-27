@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { passwordField } from '../../lib/passwordRules.js';
 
 /** Limits for the provider's "Set up your profile" fields — the app enforces the same numbers
  *  (profile_limits.dart) and shows these messages under each field. */
@@ -120,7 +121,12 @@ export const serviceTypesSchema = z.object({
   // Free-text "Other" services to flag for admin approval. categoryId is optional — when
   // omitted (a single global "Other"), it's filed under a fallback "Other" category.
   customServices: z
-    .array(z.object({ categoryId: z.number().int().optional(), name: z.string().min(1) }))
+    .array(
+      z.object({
+        categoryId: z.number().int().optional(),
+        name: z.string().trim().min(1, 'Enter the name of your service').max(60, 'Service name can be at most 60 characters'),
+      }),
+    )
     .optional(),
 });
 
@@ -268,7 +274,8 @@ export const updatePhoneSchema = z.object({
 
 export const changePasswordSchema = z.object({
   currentPassword: z.string().optional(),
-  newPassword: z.string().min(6).max(72),
+  // The sign-up policy; it used to accept any 6 characters here.
+  newPassword: passwordField,
 });
 
 export const reportProfileSchema = z.object({

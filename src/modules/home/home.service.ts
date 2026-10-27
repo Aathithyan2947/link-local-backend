@@ -249,7 +249,9 @@ export async function getHomeFeed(userId: number, opts: { scope?: HomeScope; are
         // comes up visibly short of the number on the badge.
         take: 20,
         include: {
-          serviceTypes: { include: { subcategory: true }, take: 4 },
+          // All approved services: a card shows the first + N, and a service shortcut filters
+          // on any of them (BUG-099).
+          serviceTypes: { where: { subcategory: { isActive: true } }, include: { subcategory: true } },
           _count: { select: { ratings: true } },
           ...providerLocationInclude,
         },

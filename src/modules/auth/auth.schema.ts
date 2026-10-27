@@ -1,16 +1,6 @@
 import { z } from 'zod';
 import { PROFILE_LIMITS } from '../profiles/profiles.schema.js';
-
-// Strong password policy: 8+ chars with at least one uppercase, one lowercase, one number
-// and one special character.
-const passwordField = z
-  .string()
-  .min(8, 'Password must be at least 8 characters')
-  .max(72)
-  .regex(/[A-Z]/, 'Password must include an uppercase letter')
-  .regex(/[a-z]/, 'Password must include a lowercase letter')
-  .regex(/[0-9]/, 'Password must include a number')
-  .regex(/[^A-Za-z0-9]/, 'Password must include a special character');
+import { passwordField } from '../../lib/passwordRules.js';
 
 const emailField = z.string().email('Please enter a valid email address');
 
@@ -83,9 +73,25 @@ export const otpVerifySchema = z
   })
   .refine((d) => d.mobile || d.email, { message: 'mobile or email required', path: ['mobile'] });
 
+/** The account a password reset is for: its email or 10-digit mobile number. */
+const resetIdentifier = z
+  .string()
+  .trim()
+  .min(1, 'Enter your email or mobile number')
+  .refine((v) => /^[0-9]{10}$/.test(v) || z.string().email().safeParse(v).success, 'Enter a valid email or 10-digit mobile number');
+
+export const passwordForgotSchema = z.object({ identifier: resetIdentifier });
+
+export const passwordResetSchema = z.object({
+  identifier: resetIdentifier,
+  otp: z.string().regex(/^[0-9]{6}$/, 'Enter the 6-digit code'),
+  newPassword: passwordField,
+});
+
 export type OtpRequestInput = z.infer<typeof otpRequestSchema>;
 export type OtpVerifyInput = z.infer<typeof otpVerifySchema>;
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type AdminLoginInput = z.infer<typeof adminLoginSchema>;
+export type PasswordResetInput = z.infer<typeof passwordResetSchema>;

@@ -71,7 +71,7 @@ export async function listMembers(
         photoUrl: true,
         user: { select: { userType: true } },
         address: { select: { lane2: true, area: { select: { areaName: true } } } },
-        serviceTypes: { take: 1, select: { subcategory: { select: { name: true } } } },
+        serviceTypes: { where: { subcategory: { isActive: true } }, take: 1, select: { subcategory: { select: { name: true } } } },
         professions: { take: 1, select: { professionMaster: { select: { category: true } } } },
       },
       ...toPrismaPagination(params),

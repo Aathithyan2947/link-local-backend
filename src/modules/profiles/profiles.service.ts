@@ -576,6 +576,26 @@ export async function suggestOfferHelp(userId: number) {
 export async function setServiceTypes(userId: number, input: z.infer<typeof serviceTypesSchema>) {
   const profile = await requireProfile(userId);
   const ids = [...input.subcategoryIds];
+  if (!ids.length && !input.customServices?.length) {
+    throw ApiError.badRequest('Select at least one service you offer');
+  }
+
+  // Approved services, plus a pending "Other" this provider already has: My Services re-sends
+  // those (BUG-096), and they aren't in the picker until an admin approves them.
+  if (ids.length) {
+    const current = await prisma.profileServiceType.findMany({
+      where: { profileId: profile.id },
+      select: { subcategoryId: true },
+    });
+    const allowed = await prisma.serviceSubcategory.findMany({
+      where: {
+        id: { in: ids },
+        OR: [{ isActive: true }, { id: { in: current.map((c) => c.subcategoryId) } }],
+      },
+      select: { id: true },
+    });
+    if (allowed.length !== new Set(ids).size) throw ApiError.badRequest('One of the selected services is not available');
+  }
 
   // Lazily resolve a fallback "Other" category for custom services without a categoryId.
   let otherCategoryId: number | undefined;

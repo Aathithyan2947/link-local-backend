@@ -6,6 +6,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok, paginated } from '../../utils/http.js';
 import { paginationSchema } from '../../utils/pagination.js';
 import * as service from './discovery.service.js';
+import { requireAddressProof } from '../../lib/addressProof.js';
 import {
   CONTENT_LIMITS as L,
   descriptionField,
@@ -118,6 +119,7 @@ eventsRouter.get(
 eventsRouter.post(
   '/',
   authenticate('user'),
+  requireAddressProof('host an event'),
   validate({ body: createEventSchema }),
   asyncHandler(async (req, res) => ok(res, await service.createEvent(req.auth!.sub, req.body), 201)),
 );
@@ -139,6 +141,7 @@ eventsRouter.patch(
 eventsRouter.post(
   '/:id/join',
   authenticate('user'),
+  requireAddressProof('join an event'),
   asyncHandler(async (req, res) => ok(res, await service.joinEvent(Number(req.params.id), req.auth!.sub))),
 );
 eventsRouter.post(
@@ -151,6 +154,7 @@ eventsRouter.post(
 eventsRouter.post(
   '/:id/pay',
   authenticate('user'),
+  requireAddressProof('join an event'),
   validate({ body: paySchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.payForEvent(Number(req.params.id), req.auth!.sub, req.body.couponCode), 201),
@@ -159,6 +163,7 @@ eventsRouter.post(
 eventsRouter.post(
   '/:id/ratings',
   authenticate('user'),
+  requireAddressProof('submit a review'),
   validate({ body: ratingSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.rateEvent(Number(req.params.id), req.auth!.sub, req.body), 201),
@@ -221,6 +226,7 @@ groupsRouter.get(
 groupsRouter.post(
   '/',
   authenticate('user'),
+  requireAddressProof('start a group'),
   validate({ body: createGroupSchema }),
   asyncHandler(async (req, res) => ok(res, await service.createGroup(req.auth!.sub, req.body), 201)),
 );
@@ -242,16 +248,26 @@ groupsRouter.patch(
 groupsRouter.post(
   '/:id/join',
   authenticate('user'),
+  requireAddressProof('join a group'),
   asyncHandler(async (req, res) => ok(res, await service.joinGroup(Number(req.params.id), req.auth!.sub))),
 );
+// The admin names a member to take over (BUG-081); everyone else, and older app builds, send
+// no body at all.
+const leaveGroupSchema = z
+  .object({ newAdminUserId: z.coerce.number().int().positive().optional() })
+  .default({});
 groupsRouter.post(
   '/:id/leave',
   authenticate('user'),
-  asyncHandler(async (req, res) => ok(res, await service.leaveGroup(Number(req.params.id), req.auth!.sub))),
+  validate({ body: leaveGroupSchema }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.leaveGroup(Number(req.params.id), req.auth!.sub, req.body.newAdminUserId)),
+  ),
 );
 groupsRouter.post(
   '/:id/pay',
   authenticate('user'),
+  requireAddressProof('join a group'),
   validate({ body: paySchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.payForGroup(Number(req.params.id), req.auth!.sub, req.body.couponCode), 201),
@@ -260,6 +276,7 @@ groupsRouter.post(
 groupsRouter.post(
   '/:id/ratings',
   authenticate('user'),
+  requireAddressProof('submit a review'),
   validate({ body: ratingSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.rateGroup(Number(req.params.id), req.auth!.sub, req.body), 201),
@@ -297,6 +314,7 @@ groupsRouter.post(
 groupsRouter.post(
   '/:id/posts',
   authenticate('user'),
+  requireAddressProof('post in a group'),
   validate({ body: groupPostSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.createGroupPost(Number(req.params.id), req.auth!.sub, req.body), 201),
@@ -313,6 +331,16 @@ serviceProvidersRouter.get(
     const q = getValidatedQuery<z.infer<typeof spListQuery>>(req);
     const { items, meta } = await service.listServiceProviders(req.auth!.sub, q);
     paginated(res, items, meta);
+  }),
+);
+// All Services (BUG-087). Before '/:id', which would otherwise take "services" as an id.
+serviceProvidersRouter.get(
+  '/services',
+  authenticate('user'),
+  validate({ query: listQuery.pick({ scope: true, areaId: true }) }),
+  asyncHandler(async (req, res) => {
+    const q = getValidatedQuery<{ scope?: 'society' | 'lane' | 'area' | 'city'; areaId?: number }>(req);
+    ok(res, await service.listServiceCatalog(req.auth!.sub, q));
   }),
 );
 serviceProvidersRouter.get(
@@ -338,6 +366,7 @@ serviceProvidersRouter.get(
 serviceProvidersRouter.post(
   '/:id/ratings',
   authenticate('user'),
+  requireAddressProof('submit a review'),
   validate({ body: ratingSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.rateServiceProvider(Number(req.params.id), req.auth!.sub, req.body), 201),

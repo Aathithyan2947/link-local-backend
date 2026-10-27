@@ -14,7 +14,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   if (err instanceof ApiError) {
     return res
       .status(err.statusCode)
-      .json({ success: false, message: err.message, details: err.details });
+      .json({ success: false, message: err.message, details: err.details, code: err.code });
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {

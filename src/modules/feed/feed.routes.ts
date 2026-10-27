@@ -7,6 +7,7 @@ import { ok, paginated } from '../../utils/http.js';
 import { paginationSchema } from '../../utils/pagination.js';
 import * as service from './feed.service.js';
 import { postTextField } from '../../lib/contentLimits.js';
+import { requireAddressProof } from '../../lib/addressProof.js';
 
 export const feedRouter = Router();
 
@@ -55,6 +56,7 @@ feedRouter.get(
 feedRouter.post(
   '/',
   authenticate('user'),
+  requireAddressProof('create a post'),
   validate({ body: createPostSchema }),
   asyncHandler(async (req, res) => ok(res, await service.createPost(req.auth!.sub, req.body), 201)),
 );
@@ -62,6 +64,7 @@ feedRouter.post(
 feedRouter.post(
   '/:id/like',
   authenticate('user'),
+  requireAddressProof('like a post'),
   asyncHandler(async (req, res) =>
     ok(res, await service.toggleLike(req.auth!.sub, Number(req.params.id))),
   ),
@@ -71,6 +74,7 @@ feedRouter.post(
 feedRouter.put(
   '/:id/like',
   authenticate('user'),
+  requireAddressProof('like a post'),
   validate({ body: likeSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.setPostLike(req.auth!.sub, Number(req.params.id), req.body.liked)),
@@ -79,6 +83,7 @@ feedRouter.put(
 feedRouter.put(
   '/comments/:commentId/like',
   authenticate('user'),
+  requireAddressProof('like a comment'),
   validate({ body: likeSchema }),
   asyncHandler(async (req, res) =>
     ok(res, await service.setCommentLike(req.auth!.sub, Number(req.params.commentId), req.body.liked)),
@@ -88,6 +93,7 @@ feedRouter.put(
 feedRouter.post(
   '/comments/:commentId/like',
   authenticate('user'),
+  requireAddressProof('like a comment'),
   asyncHandler(async (req, res) =>
     ok(res, await service.toggleCommentLike(req.auth!.sub, Number(req.params.commentId))),
   ),
@@ -127,6 +133,7 @@ feedRouter.post(
 feedRouter.post(
   '/:id/comments',
   authenticate('user'),
+  requireAddressProof('comment on a post'),
   validate({ body: commentSchema }),
   asyncHandler(async (req, res) =>
     ok(

@@ -145,7 +145,7 @@ export async function getEvent(id: number, viewerId?: number) {
               name: true,
               photoUrl: true,
               aboutMe: true,
-              serviceTypes: { include: { subcategory: true }, take: 1 },
+              serviceTypes: { where: { subcategory: { isActive: true } }, include: { subcategory: true }, take: 1 },
               address: { include: { area: { include: { city: true } } } },
             },
           },
@@ -552,7 +552,8 @@ export async function getGroup(id: number, viewerId?: number) {
       _count: { select: { members: { where: { status: 'joined' } } } },
     },
   });
-  if (!group) throw ApiError.notFound('Group not found');
+  // A group its admin closed (BUG-081) is gone, even from an old link or notification.
+  if (!group || !group.isActive) throw ApiError.notFound('Group not found');
 
   const agg = await prisma.interestGroupRating.aggregate({
     where: { groupId: id },
@@ -737,7 +738,7 @@ async function groupEntry(groupId: number, userId: number) {
     where: { id: groupId },
     include: { _count: { select: { members: { where: { status: 'joined' } } } } },
   });
-  if (!group) throw ApiError.notFound('Group not found');
+  if (!group || !group.isActive) throw ApiError.notFound('Group not found');
   if (group.creatorId === userId) throw ApiError.badRequest('You created this group');
   const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
   if (existing?.status === 'joined' || existing?.status === 'pending_approval') {
@@ -790,13 +791,67 @@ export async function joinGroup(groupId: number, userId: number) {
   return admitMember(group, userId, existing, group.isPaid ? 'paid' : null);
 }
 
-export async function leaveGroup(groupId: number, userId: number) {
-  const group = await prisma.interestGroup.findUnique({ where: { id: groupId }, select: { creatorId: true } });
-  if (!group) throw ApiError.notFound('Group not found');
-  if (group.creatorId === userId) throw ApiError.badRequest('The creator cannot exit the group');
+export async function leaveGroup(groupId: number, userId: number, newAdminUserId?: number) {
+  const group = await prisma.interestGroup.findUnique({
+    where: { id: groupId },
+    select: { creatorId: true, title: true, isActive: true },
+  });
+  if (!group || !group.isActive) throw ApiError.notFound('Group not found');
+  if (group.creatorId === userId) return adminExitGroup(groupId, userId, group.title, newAdminUserId);
   const existing = await prisma.interestGroupMember.findFirst({ where: { groupId, userId } });
   if (!existing) throw ApiError.badRequest('You are not a member');
   return prisma.interestGroupMember.update({ where: { id: existing.id }, data: { status: 'exited' } });
+}
+
+/**
+ * The admin leaves (BUG-081). With other members, they hand the group to one of them first:
+ * the new admin owns it from then on, and the handover is recorded. As the only member, they
+ * close it instead; it drops out of every list.
+ */
+async function adminExitGroup(groupId: number, userId: number, title: string, newAdminUserId?: number) {
+  const others = await prisma.interestGroupMember.findMany({
+    where: { groupId, status: 'joined', userId: { not: userId } },
+    select: { userId: true },
+  });
+
+  if (others.length === 0) {
+    await prisma.$transaction([
+      prisma.interestGroup.update({ where: { id: groupId }, data: { isActive: false } }),
+      prisma.interestGroupMember.updateMany({ where: { groupId, userId }, data: { status: 'exited' } }),
+    ]);
+    return { exited: true, closed: true };
+  }
+
+  const pick = { newAdminUserId: ['Choose a member to be the new admin'] };
+  if (newAdminUserId == null) throw ApiError.badRequest('Choose a new admin before you exit', pick);
+  if (!others.some((m) => m.userId === newAdminUserId)) {
+    throw ApiError.badRequest('The new admin must be a member of this group', pick);
+  }
+
+  await prisma.$transaction([
+    prisma.interestGroup.update({ where: { id: groupId }, data: { creatorId: newAdminUserId } }),
+    prisma.interestGroupAdmin.deleteMany({ where: { groupId, userId: { in: [userId, newAdminUserId] } } }),
+    prisma.interestGroupAdmin.create({ data: { groupId, userId: newAdminUserId, isCreator: true } }),
+    prisma.interestGroupOwnershipTransfer.create({
+      data: {
+        groupId,
+        transferredFrom: userId,
+        transferredTo: newAdminUserId,
+        transferReason: 'creator_exit_request',
+        initiatedBy: userId,
+      },
+    }),
+    prisma.interestGroupMember.updateMany({ where: { groupId, userId }, data: { status: 'exited' } }),
+  ]);
+  await emitNotification({
+    userId: newAdminUserId,
+    title: 'You are now the group admin',
+    body: `You're the admin of "${title}" now.`,
+    type: 'group_invite',
+    entityType: 'group',
+    entityId: groupId,
+  });
+  return { exited: true, closed: false, newAdminUserId };
 }
 
 /** Pays for a paid group; the user becomes a member only once the charge succeeds. */
@@ -902,21 +957,26 @@ export async function myGroups(userId: number) {
 }
 
 // ── Service Providers ────────────────────────────────────────
-export async function listServiceProviders(
-  userId: number,
-  params: PaginationParams & { q?: string; subcategoryId?: number; scope?: HomeScope; areaId?: number },
-) {
+/** The providers a viewer may browse in a scope: the list, and the All Services counts. */
+async function browsableProvidersWhere(userId: number, params: { scope?: HomeScope; areaId?: number }) {
   const ctx = await resolveUserScopeContext(userId);
   const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
   const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
-  const hasFilter = Object.keys(addressFilter).length > 0;
   const where: Record<string, unknown> = {
     // Not the viewer themselves (as on Home), so both screens count the same providers.
     user: { id: { not: userId }, userType: 'service_provider', isActive: true },
     // Only providers whose Profile visibility lets this viewer see them.
     AND: [visibleProfileWhere(ctx)],
   };
-  if (hasFilter) where.address = addressFilter;
+  if (Object.keys(addressFilter).length > 0) where.address = addressFilter;
+  return where;
+}
+
+export async function listServiceProviders(
+  userId: number,
+  params: PaginationParams & { q?: string; subcategoryId?: number; scope?: HomeScope; areaId?: number },
+) {
+  const where = await browsableProvidersWhere(userId, params);
   if (params.q) where.name = { contains: params.q, mode: 'insensitive' };
   if (params.subcategoryId)
     where.serviceTypes = { some: { subcategoryId: params.subcategoryId } };
@@ -926,7 +986,8 @@ export async function listServiceProviders(
       where,
       orderBy: { createdAt: 'desc' },
       include: {
-        serviceTypes: { include: { subcategory: true } },
+        // Every approved service (BUG-099); a pending "Other" stays off the public list.
+        serviceTypes: { where: { subcategory: { isActive: true } }, include: { subcategory: true } },
         _count: { select: { ratings: true } },
         ...providerLocationInclude,
       },
@@ -941,6 +1002,44 @@ export async function listServiceProviders(
     ratingCount: ratings.get(p.id)?.count ?? p._count.ratings,
   }));
   return { items: enriched, meta: buildMeta(params.page, params.pageSize, total) };
+}
+
+/**
+ * Every approved service, by category, with how many providers in scope offer it: the All
+ * Services page behind Home's "Explore More" (BUG-087). Counted with the same rule as the list
+ * a tile opens (`listServiceProviders` with its subcategoryId), so the two always agree.
+ * Services nobody offers yet are included at 0; the catch-all "Other" isn't.
+ */
+export async function listServiceCatalog(userId: number, params: { scope?: HomeScope; areaId?: number }) {
+  const where = await browsableProvidersWhere(userId, params);
+  const [categories, counts] = await Promise.all([
+    prisma.serviceCategory.findMany({
+      where: { isActive: true },
+      orderBy: { name: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        subcategories: {
+          where: { isActive: true, NOT: { name: { in: ['Other', 'Others'] } } },
+          orderBy: { name: 'asc' },
+          select: { id: true, name: true },
+        },
+      },
+    }),
+    prisma.profileServiceType.groupBy({
+      by: ['subcategoryId'],
+      where: { profile: where },
+      _count: { profileId: true },
+    }),
+  ]);
+  const countOf = new Map(counts.map((c) => [c.subcategoryId, c._count.profileId]));
+  return categories
+    .map((c) => ({
+      id: c.id,
+      name: c.name,
+      services: c.subcategories.map((s) => ({ id: s.id, name: s.name, count: countOf.get(s.id) ?? 0 })),
+    }))
+    .filter((c) => c.services.length > 0);
 }
 
 export async function getServiceProvider(id: number, callerId?: number) {
@@ -1091,6 +1190,8 @@ export async function getServiceProvider(id: number, callerId?: number) {
 
   return {
     ...sp,
+    // A service waiting for admin approval shows only on the owner's own page (BUG-099).
+    serviceTypes: isOwner ? sp.serviceTypes : sp.serviceTypes.filter((st) => st.subcategory.isActive),
     // The owner's page shows their own address; anyone else gets the area and city only.
     address: isOwner ? sp.address : areaAndCityOnly(sp.address),
     servicePhone: isOwner ? sp.servicePhone : null,
@@ -1156,7 +1257,7 @@ export async function myReviews(userId: number) {
             name: true,
             photoUrl: true,
             address: { select: { fullAddress: true } },
-            serviceTypes: { include: { subcategory: true }, take: 1 },
+            serviceTypes: { where: { subcategory: { isActive: true } }, include: { subcategory: true }, take: 1 },
           },
         },
       },

@@ -2,12 +2,15 @@
 export class ApiError extends Error {
   public readonly statusCode: number;
   public readonly details?: unknown;
+  /** A stable name the app can act on (e.g. ADDRESS_PROOF_REQUIRED), unlike the message. */
+  public readonly code?: string;
   public readonly isOperational: boolean;
 
-  constructor(statusCode: number, message: string, details?: unknown) {
+  constructor(statusCode: number, message: string, details?: unknown, code?: string) {
     super(message);
     this.statusCode = statusCode;
     this.details = details;
+    this.code = code;
     this.isOperational = true;
     Object.setPrototypeOf(this, ApiError.prototype);
   }
