@@ -64,6 +64,28 @@ export async function sanitizeAreaOverride(areaId: number | undefined, cityId: n
   return area?.cityId === cityId ? areaId : null;
 }
 
+/** [sanitizeAreaOverride] for several areas: only those in the caller's own city. */
+export async function sanitizeAreaIds(areaIds: number[] | undefined, cityId: number | null): Promise<number[]> {
+  if (!areaIds?.length || !cityId) return [];
+  const areas = await prisma.area.findMany({ where: { id: { in: areaIds }, cityId }, select: { id: true } });
+  return areas.map((a) => a.id);
+}
+
+/**
+ * The address filter for a list endpoint. Several picked areas (a Home section's multi-area
+ * dropdown, BUG-086) win over the scope; none valid falls back to the scope and single
+ * picked area, exactly as before.
+ */
+export async function listAddressFilter(
+  scope: HomeScope,
+  ctx: ScopeContext,
+  params: { areaId?: number; areaIds?: number[] },
+): Promise<Record<string, unknown>> {
+  const areaIds = await sanitizeAreaIds(params.areaIds, ctx.cityId);
+  if (areaIds.length) return { areaId: { in: areaIds } };
+  return addressScopeFilter(scope, ctx, await sanitizeAreaOverride(params.areaId, ctx.cityId));
+}
+
 /** One shared Address-shaped where-fragment, reused by every query below. Degrades to the
  *  next broader level when the sharper field is missing (e.g. the user hasn't filled in an
  *  apartment/lane name) so a scope pick never silently returns zero results. */

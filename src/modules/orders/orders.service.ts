@@ -8,6 +8,7 @@ import { resolveCoupon, redeemCoupon } from '../../lib/coupons.js';
 import { isSlotOpen, timeToDate, dateOnly } from '../../lib/slots.js';
 import { PLATFORM_FEE } from '../../lib/providerKind.js';
 import { getCustomFieldsForProfile } from '../../lib/customFields.js';
+import { advanceAmount, resolveAdvanceTerms, type AdvanceTerms } from '../../lib/advancePayment.js';
 
 const orderInclude = {
   buyer: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } },
@@ -18,27 +19,73 @@ const orderInclude = {
   deliveryAddress: { select: { fullAddress: true } },
 };
 
-/**
- * How much is due right now for this order. Only product orders respect the SP's configured
- * `partial_advance` % — booking orders are left at the full amount, since the same `payOrder`
- * path also serves `createDirectPayment` (an ad-hoc, resident-typed amount for direct-negotiated
- * services, not a computed order total), and the two aren't distinguishable without a schema
- * change; applying a partial-advance % there would silently under-charge a manually agreed sum.
- */
-async function computeAmountDue(order: { id: number; orderKind: string; spProfileId: number; totalAmount: Prisma.Decimal | number }): Promise<number> {
-  const total = Number(order.totalAmount);
-  if (order.orderKind !== 'product') return total;
-  const terms = await prisma.spPaymentTerm.findUnique({ where: { profileId: order.spProfileId } });
-  if (terms?.paymentTerms !== 'partial_advance') return total;
-  const pct = Number(terms.partialAdvancePct ?? 100);
-  return Math.round(((total * pct) / 100) * 100) / 100;
+const round2 = (n: number) => Math.round(n * 100) / 100;
+/** ₹ amount for a message: whole rupees, or with paise when there are any. */
+const rupees = (n: number) => (Number.isInteger(n) ? n.toFixed(0) : n.toFixed(2));
+
+/** Where an order's payments stand, sent with every order. */
+export interface PaymentSummary {
+  /** What the next payment charges: the advance first, then whatever is left. */
+  amountDue: number;
+  amountPaid: number;
+  balanceDue: number;
+  /** The share charged at checkout: 100 is everything, 0 is nothing (the buyer pays later). */
+  advancePercent: number;
+  advanceAmount: number;
+  /** "No Advance": the order is placed without paying, then paid from Order Tracking. */
+  payLater: boolean;
 }
 
-async function attachAmountDue<T extends { id: number; orderKind: string; spProfileId: number; totalAmount: Prisma.Decimal }>(
-  order: T | null,
-): Promise<(T & { amountDue: number }) | null> {
+type PaymentRow = { amount: Prisma.Decimal | number; paymentStatus: string };
+
+/**
+ * Where an order's payments stand (BUG-097). A product order follows the provider's advance
+ * terms; a booking or direct payment (an amount the resident typed) is charged in full. The
+ * provider's terms used to be read from `SpPaymentTerm`, which nothing fills in, so checkout
+ * always charged everything.
+ */
+export function paymentSummary(
+  order: { orderKind: string; totalAmount: Prisma.Decimal | number; payments?: PaymentRow[] },
+  terms: AdvanceTerms | null,
+): PaymentSummary {
+  const total = Number(order.totalAmount);
+  const paid = (order.payments ?? []).filter((p) => p.paymentStatus === 'paid');
+  const amountPaid = round2(paid.reduce((s, p) => s + Number(p.amount), 0));
+  const balanceDue = Math.max(round2(total - amountPaid), 0);
+  const percent = order.orderKind === 'product' ? (terms?.percent ?? 100) : 100;
+  const advance = advanceAmount(total, percent);
+  return {
+    amountDue: paid.length === 0 && advance > 0 ? advance : balanceDue,
+    amountPaid,
+    balanceDue,
+    advancePercent: percent,
+    advanceAmount: advance,
+    payLater: percent === 0,
+  };
+}
+
+type SummarisableOrder = { orderKind: string; spProfileId: number; totalAmount: Prisma.Decimal; payments: PaymentRow[] };
+
+async function withPaymentSummary<T extends SummarisableOrder>(order: T | null): Promise<(T & PaymentSummary) | null> {
   if (!order) return null;
-  return { ...order, amountDue: await computeAmountDue(order) };
+  const terms = order.orderKind === 'product' ? await resolveAdvanceTerms(order.spProfileId) : null;
+  return { ...order, ...paymentSummary(order, terms) };
+}
+
+/** [withPaymentSummary] for a list, reading each provider's terms once. */
+async function withPaymentSummaries<T extends SummarisableOrder>(orders: T[]): Promise<(T & PaymentSummary)[]> {
+  const terms = new Map<number, Promise<AdvanceTerms | null>>();
+  const termsOf = (spProfileId: number) => {
+    let t = terms.get(spProfileId);
+    if (!t) terms.set(spProfileId, (t = resolveAdvanceTerms(spProfileId)));
+    return t;
+  };
+  return Promise.all(
+    orders.map(async (o) => ({
+      ...o,
+      ...paymentSummary(o, o.orderKind === 'product' ? await termsOf(o.spProfileId) : null),
+    })),
+  );
 }
 
 // ── Fees ─────────────────────────────────────────────────────
@@ -147,7 +194,10 @@ export interface QuoteInput {
   couponCode?: string;
 }
 
-export async function quoteOrder(data: QuoteInput): Promise<OrderFees> {
+/** A quote, with what checkout charges now and what's left for later (BUG-097). */
+export type OrderQuote = OrderFees & { advancePercent: number; advanceAmount: number; payLater: boolean };
+
+export async function quoteOrder(data: QuoteInput): Promise<OrderQuote> {
   const sp = await prisma.profile.findUnique({ where: { id: data.spProfileId }, select: { id: true } });
   if (!sp) throw ApiError.notFound('Service provider not found');
 
@@ -155,23 +205,29 @@ export async function quoteOrder(data: QuoteInput): Promise<OrderFees> {
     const rate = await requireRate(data.spProfileId, data.rateType);
     const coupon = await resolveCoupon(data.couponCode, rate);
     const discount = coupon?.discount ?? 0;
+    const total = Math.max(rate - discount, 0);
     return {
       subtotal: rate,
       deliveryCharge: 0,
       packagingCharge: 0,
       platformFee: 0,
       discount,
-      total: Math.max(rate - discount, 0),
+      total,
       couponId: coupon?.couponId,
       freeDeliveryThreshold: null,
       freeDeliveryRemaining: 0,
+      advancePercent: 100,
+      advanceAmount: total,
+      payLater: false,
     };
   }
 
   const rows = await buildItemRows(data.spProfileId, (data.items ?? []).map((i) => ({ ...i })));
   const subtotal = rows.reduce((s, r) => s + r.totalPrice, 0);
   const delivery = await resolveDeliverySettings(data.spProfileId);
-  return computeProductFees(delivery, subtotal, data.deliveryType ?? 'pickup', data.couponCode);
+  const fees = await computeProductFees(delivery, subtotal, data.deliveryType ?? 'pickup', data.couponCode);
+  const percent = (await resolveAdvanceTerms(data.spProfileId))?.percent ?? 100;
+  return { ...fees, advancePercent: percent, advanceAmount: advanceAmount(fees.total, percent), payLater: percent === 0 };
 }
 
 // ── Product order ────────────────────────────────────────────
@@ -246,7 +302,7 @@ export async function placeOrder(buyerId: number, data: PlaceOrderInput) {
     entityType: 'order',
     entityId: orderId,
   });
-  return attachAmountDue(await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude }));
+  return withPaymentSummary(await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude }));
 }
 
 // ── Service booking (request → accept → pay) ─────────────────
@@ -315,7 +371,7 @@ export async function placeBooking(buyerId: number, data: PlaceBookingInput) {
     entityType: 'order',
     entityId: orderId,
   });
-  return attachAmountDue(await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude }));
+  return withPaymentSummary(await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude }));
 }
 
 /**
@@ -352,7 +408,7 @@ export async function createDirectPayment(buyerId: number, spProfileId: number, 
       acceptedAt: new Date(),
     },
   });
-  return attachAmountDue(await prisma.order.findUnique({ where: { id: order.id }, include: orderInclude }));
+  return withPaymentSummary(await prisma.order.findUnique({ where: { id: order.id }, include: orderInclude }));
 }
 
 /** Materialize + lock a slot for an order (used by both product and booking placement). */
@@ -385,7 +441,7 @@ export async function getOrder(id: number, viewerId: number) {
   if (order.buyerId !== viewerId && order.spProfile.userId !== viewerId) {
     throw ApiError.forbidden('You cannot view this order');
   }
-  return attachAmountDue(order);
+  return withPaymentSummary(order);
 }
 
 // ── Payments "seen" marker (profile → Payments badge) ────────
@@ -407,15 +463,19 @@ export async function markPaymentsSeen(userId: number) {
 }
 
 export async function myOrders(buyerId: number) {
-  return prisma.order.findMany({ where: { buyerId }, orderBy: { placedAt: 'desc' }, include: orderInclude });
+  return withPaymentSummaries(
+    await prisma.order.findMany({ where: { buyerId }, orderBy: { placedAt: 'desc' }, include: orderInclude }),
+  );
 }
 
 export async function incomingOrders(spUserId: number) {
-  return prisma.order.findMany({
-    where: { spProfile: { userId: spUserId } },
-    orderBy: { placedAt: 'desc' },
-    include: orderInclude,
-  });
+  return withPaymentSummaries(
+    await prisma.order.findMany({
+      where: { spProfile: { userId: spUserId } },
+      orderBy: { placedAt: 'desc' },
+      include: orderInclude,
+    }),
+  );
 }
 
 // ── Accept / Reject (SP) ─────────────────────────────────────
@@ -452,7 +512,7 @@ export async function acceptOrder(orderId: number, spUserId: number) {
     entityType: 'order',
     entityId: orderId,
   });
-  return attachAmountDue(updated);
+  return withPaymentSummary(updated);
 }
 
 /** SP rejects: frees any held slot and notifies the buyer. */
@@ -475,7 +535,7 @@ export async function rejectOrder(orderId: number, spUserId: number, reason?: st
     entityType: 'order',
     entityId: orderId,
   });
-  return updated;
+  return withPaymentSummary(updated);
 }
 
 // ── Fulfilment status (SP) + cancel (buyer/SP) ───────────────
@@ -530,7 +590,23 @@ export async function updateOrderStatus(orderId: number, actorUserId: number, st
     entityType: 'order',
     entityId: orderId,
   });
-  return updated;
+
+  const withSummary = (await withPaymentSummary(updated))!;
+  // The order has reached the buyer with something still owed (an advance order's balance, or
+  // a pay-later order): remind them where to pay it (BUG-097). Once, on delivery, or on
+  // completion when the seller skipped "delivered".
+  const reachedBuyer = status === 'delivered' || (status === 'completed' && order.status !== 'delivered');
+  if (order.orderKind === 'product' && reachedBuyer && withSummary.balanceDue > 0) {
+    await emitNotification({
+      userId: order.buyerId,
+      title: 'Balance due',
+      body: `₹${rupees(withSummary.balanceDue)} is left to pay for order #${orderId}. Pay it from My Orders.`,
+      type: 'payment',
+      entityType: 'order',
+      entityId: orderId,
+    });
+  }
+  return withSummary;
 }
 
 async function freeSlot(orderId: number) {
@@ -560,25 +636,30 @@ export async function payOrder(
     throw ApiError.badRequest('This booking is not ready for payment yet');
   }
 
-  const amount = await computeAmountDue(order);
-  // One payment per order (the app only ever sends `advance`, and nothing sets up balance
-  // payments yet). The check and the insert run under a row lock on the order, so two requests
-  // arriving together — e.g. the app's timeout retry re-sending the POST on a slow cold start —
-  // can't both get past it.
-  const payment = await prisma.$transaction(async (tx) => {
+  const terms = order.orderKind === 'product' ? await resolveAdvanceTerms(order.spProfileId) : null;
+  // The advance first, then the balance (BUG-097); never more than the total. The server
+  // decides the amount and kind, whatever the app sends. The check and the insert run under a
+  // row lock on the order, so two requests arriving together — e.g. the app's timeout retry
+  // re-sending the POST on a slow cold start — can't both get past it.
+  const { payment, amount, balanceAfter, isBalance } = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} FOR UPDATE`;
-    const alreadyPaid = await tx.orderPayment.findFirst({
+    const paid = await tx.orderPayment.findMany({
       where: { orderId, paymentStatus: 'paid' },
-      select: { id: true },
+      select: { amount: true, paymentStatus: true },
     });
-    if (alreadyPaid) throw ApiError.conflict('This order is already paid');
+    const summary = paymentSummary({ ...order, payments: paid }, terms);
+    if (paid.length > 0 && summary.balanceDue <= 0) throw ApiError.conflict('This order is already paid');
+    const amount = summary.amountDue;
+    // 'advance' is paid before the order is settled; 'final' settles it after an earlier
+    // payment, or pays a no-advance order in one go.
+    const paymentType = paid.length > 0 || summary.payLater ? 'final' : 'advance';
 
     const charge = mockCharge(amount); // MOCK gateway
     const created = await tx.orderPayment.create({
       data: {
         orderId,
         amount,
-        paymentType: opts.paymentType ?? 'advance',
+        paymentType,
         paymentMethod: opts.paymentMethod ?? 'upi',
         paymentSubMethod: opts.paymentSubMethod,
         paymentStatus: 'paid',
@@ -590,13 +671,17 @@ export async function payOrder(
     if (order.orderKind === 'booking' && order.status === 'accepted') {
       await tx.order.update({ where: { id: orderId }, data: { status: 'confirmed', confirmedAt: new Date() } });
     }
-    return created;
+    return { payment: created, amount, balanceAfter: round2(summary.balanceDue - amount), isBalance: paid.length > 0 };
   });
   await bumpUserStats(order.spProfile.userId, { paymentReceivedTotal: amount });
   await emitNotification({
     userId: order.spProfile.userId,
     title: 'Payment received',
-    body: `Payment of ₹${amount.toFixed(0)} received for order #${orderId}`,
+    body: isBalance
+      ? `Balance of ₹${rupees(amount)} received for order #${orderId}. It's fully paid.`
+      : balanceAfter > 0
+        ? `Advance of ₹${rupees(amount)} received for order #${orderId} (₹${rupees(balanceAfter)} still due)`
+        : `Payment of ₹${rupees(amount)} received for order #${orderId}`,
     type: 'payment',
     entityType: 'order',
     entityId: orderId,

@@ -7,6 +7,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { dateOnly } from '../../lib/slots.js';
 import { resolveProviderKind, resolveProviderFeatures } from '../../lib/providerKind.js';
 import { getCustomFieldsForProfile } from '../../lib/customFields.js';
+import { advancePercentError, isAdvancePercentField } from '../../lib/advancePayment.js';
 import { isTravelDistanceField, travelDistanceError } from './profiles.schema.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import type { z } from 'zod';
@@ -671,6 +672,9 @@ export async function saveCustomFields(userId: number, values: { fieldId: number
     // availability form. Details are keyed by field id so the app can mark the field.
     const distanceError = isTravelDistanceField(f) ? travelDistanceError(value) : null;
     if (distanceError) throw ApiError.badRequest(distanceError, { [String(f.id)]: [distanceError] });
+    // Checkout charges this share of the order (BUG-097); a "500" used to be saved.
+    const advanceError = isAdvancePercentField(f.fieldName) ? advancePercentError(value) : null;
+    if (advanceError) throw ApiError.badRequest(advanceError, { [String(f.id)]: [advanceError] });
   }
 
   const toSave = values.filter((v) => validIds.has(v.fieldId) && v.value.trim());

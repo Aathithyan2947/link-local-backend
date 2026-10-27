@@ -7,6 +7,7 @@ import { ok, paginated } from '../../utils/http.js';
 import { paginationSchema } from '../../utils/pagination.js';
 import * as service from './discovery.service.js';
 import { requireAddressProof } from '../../lib/addressProof.js';
+import { areaIdsQuery } from '../../lib/areaIds.js';
 import {
   CONTENT_LIMITS as L,
   descriptionField,
@@ -20,6 +21,8 @@ const listQuery = paginationSchema.extend({
   q: z.string().optional(),
   scope: z.enum(['society', 'lane', 'area', 'city']).optional(),
   areaId: z.coerce.number().int().optional(),
+  // Several areas at once, from a Home section's dropdown (BUG-086); wins over scope/areaId.
+  areaIds: areaIdsQuery.optional(),
 });
 const eventListQuery = listQuery.extend({
   upcoming: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),

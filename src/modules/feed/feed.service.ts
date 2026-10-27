@@ -3,10 +3,9 @@ import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { buildMeta, type PaginationParams, toPrismaPagination } from '../../utils/pagination.js';
 import {
-  addressScopeFilter,
+  listAddressFilter,
   resolveUserCityId,
   resolveUserScopeContext,
-  sanitizeAreaOverride,
   type HomeScope,
 } from '../home/home.service.js';
 import { bumpUserStats } from '../../lib/stats.js';
@@ -63,7 +62,7 @@ async function likedSet(userId: number, postIds: number[]): Promise<Set<number>>
 
 export async function listPosts(
   userId: number,
-  params: PaginationParams & { postType?: string; scope?: HomeScope; areaId?: number; userId?: number },
+  params: PaginationParams & { postType?: string; scope?: HomeScope; areaId?: number; areaIds?: number[]; userId?: number },
 ) {
   const where: Record<string, unknown> = { isActive: true };
   if (params.postType) where.postType = params.postType;
@@ -79,13 +78,12 @@ export async function listPosts(
     return { items: await decorateDiscussions(items, userId), meta: buildMeta(params.page, params.pageSize, total) };
   }
 
-  // Home's Community Discussions header can be re-scoped to a single area, the same way the
-  // service-provider / workshop / group sections already are. Without a scope or area this
+  // Home's Community Discussions header can be re-scoped to one or several areas, the same
+  // way the service-provider / workshop / group sections are. Without a scope or area this
   // stays exactly as it was: everything in the caller's own city.
-  if (params.scope || params.areaId !== undefined) {
+  if (params.scope || params.areaId !== undefined || params.areaIds?.length) {
     const ctx = await resolveUserScopeContext(userId);
-    const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
-    const filter = addressScopeFilter(params.scope ?? 'area', ctx, overrideAreaId);
+    const filter = await listAddressFilter(params.scope ?? 'area', ctx, params);
     if (Object.keys(filter).length > 0) where.user = { profile: { address: filter } };
   } else {
     const cityId = await resolveUserCityId(userId);

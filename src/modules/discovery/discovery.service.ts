@@ -20,7 +20,7 @@ import { buildMeta, type PaginationParams, toPrismaPagination } from '../../util
 import {
   resolveUserScopeContext,
   sanitizeAreaOverride,
-  addressScopeFilter,
+  listAddressFilter,
   type HomeScope,
 } from '../home/home.service.js';
 import { bumpUserStats } from '../../lib/stats.js';
@@ -79,11 +79,10 @@ export interface CreateEventInput {
 // ── Events / Workshops ───────────────────────────────────────
 export async function listEvents(
   userId: number,
-  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number; upcoming?: boolean },
+  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number; areaIds?: number[]; upcoming?: boolean },
 ) {
   const ctx = await resolveUserScopeContext(userId);
-  const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
-  const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
+  const addressFilter = await listAddressFilter(params.scope ?? 'city', ctx, params);
   const hasFilter = Object.keys(addressFilter).length > 0;
   const where: Record<string, unknown> = {
     isActive: true,
@@ -469,11 +468,10 @@ export async function myEvents(userId: number) {
 // ── Interest Groups ──────────────────────────────────────────
 export async function listGroups(
   userId: number,
-  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number; excludeMine?: boolean },
+  params: PaginationParams & { q?: string; scope?: HomeScope; areaId?: number; areaIds?: number[]; excludeMine?: boolean },
 ) {
   const ctx = await resolveUserScopeContext(userId);
-  const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
-  const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
+  const addressFilter = await listAddressFilter(params.scope ?? 'city', ctx, params);
   const hasFilter = Object.keys(addressFilter).length > 0;
   const where: Record<string, unknown> = {
     isActive: true,
@@ -958,10 +956,12 @@ export async function myGroups(userId: number) {
 
 // ── Service Providers ────────────────────────────────────────
 /** The providers a viewer may browse in a scope: the list, and the All Services counts. */
-async function browsableProvidersWhere(userId: number, params: { scope?: HomeScope; areaId?: number }) {
+async function browsableProvidersWhere(
+  userId: number,
+  params: { scope?: HomeScope; areaId?: number; areaIds?: number[] },
+) {
   const ctx = await resolveUserScopeContext(userId);
-  const overrideAreaId = await sanitizeAreaOverride(params.areaId, ctx.cityId);
-  const addressFilter = addressScopeFilter(params.scope ?? 'city', ctx, overrideAreaId);
+  const addressFilter = await listAddressFilter(params.scope ?? 'city', ctx, params);
   const where: Record<string, unknown> = {
     // Not the viewer themselves (as on Home), so both screens count the same providers.
     user: { id: { not: userId }, userType: 'service_provider', isActive: true },
@@ -974,7 +974,7 @@ async function browsableProvidersWhere(userId: number, params: { scope?: HomeSco
 
 export async function listServiceProviders(
   userId: number,
-  params: PaginationParams & { q?: string; subcategoryId?: number; scope?: HomeScope; areaId?: number },
+  params: PaginationParams & { q?: string; subcategoryId?: number; scope?: HomeScope; areaId?: number; areaIds?: number[] },
 ) {
   const where = await browsableProvidersWhere(userId, params);
   if (params.q) where.name = { contains: params.q, mode: 'insensitive' };

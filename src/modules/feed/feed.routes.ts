@@ -8,6 +8,7 @@ import { paginationSchema } from '../../utils/pagination.js';
 import * as service from './feed.service.js';
 import { postTextField } from '../../lib/contentLimits.js';
 import { requireAddressProof } from '../../lib/addressProof.js';
+import { areaIdsQuery } from '../../lib/areaIds.js';
 
 export const feedRouter = Router();
 
@@ -15,6 +16,8 @@ const listQuery = paginationSchema.extend({
   postType: z.enum(['buy_sell', 'ask_help', 'offer_help', 'share_update']).optional(),
   scope: z.enum(['society', 'lane', 'area', 'city']).optional(),
   areaId: z.coerce.number().int().optional(),
+  // Several areas at once, from Home's Community Discussions dropdown (BUG-086).
+  areaIds: areaIdsQuery.optional(),
   /** One member's posts (a profile's "View More"), wherever they live. */
   userId: z.coerce.number().int().optional(),
 });
