@@ -10,6 +10,7 @@ import {
 } from '../home/home.service.js';
 import { bumpUserStats } from '../../lib/stats.js';
 import { emitNotification } from '../../lib/notify.js';
+import { assertProfileVisible } from '../../lib/profileVisibility.js';
 
 const authorSelect = {
   user: { select: { id: true, profile: { select: { id: true, name: true, photoUrl: true } } } },
@@ -60,6 +61,27 @@ async function likedSet(userId: number, postIds: number[]): Promise<Set<number>>
   return new Set(rows.map((r) => r.postId));
 }
 
+/**
+ * A profile's "View More" is part of the profile, so it follows the profile's rules (BUG-104,
+ * getPublicProfile): when the owner has blocked the viewer, or their Profile visibility leaves
+ * the viewer out, it answers 403. The viewer's own posts are always visible.
+ */
+async function assertPostsVisible(ownerId: number, viewerId: number) {
+  if (ownerId === viewerId) return;
+  const [owner, block] = await Promise.all([
+    prisma.profile.findUnique({
+      where: { userId: ownerId },
+      select: { id: true, address: { select: { areaId: true, apartment: true } } },
+    }),
+    prisma.blockedUser.findUnique({
+      where: { blockerId_blockedId: { blockerId: ownerId, blockedId: viewerId } },
+      select: { id: true },
+    }),
+  ]);
+  if (block) throw ApiError.forbidden('This profile is not visible to you.');
+  if (owner) await assertProfileVisible({ userId: ownerId, profileId: owner.id, address: owner.address }, viewerId);
+}
+
 export async function listPosts(
   userId: number,
   params: PaginationParams & { postType?: string; scope?: HomeScope; areaId?: number; areaIds?: number[]; userId?: number },
@@ -70,6 +92,7 @@ export async function listPosts(
   // A profile's "View More": everything that member posted, not limited to the viewer's city
   // (the profile itself already shows their latest posts the same way).
   if (params.userId !== undefined) {
+    await assertPostsVisible(params.userId, userId);
     where.userId = params.userId;
     const [items, total] = await Promise.all([
       prisma.post.findMany({ where, orderBy: { createdAt: 'desc' }, include: postInclude, ...toPrismaPagination(params) }),

@@ -297,7 +297,11 @@ groupsRouter.get(
 groupsRouter.get(
   '/:id/members',
   authenticate('user'),
-  asyncHandler(async (req, res) => ok(res, await service.listGroupMembers(Number(req.params.id)))),
+  asyncHandler(async (req, res) => {
+    // `data` stays the plain list older app builds read; the hidden count rides alongside.
+    const { members, hiddenCount } = await service.listGroupMembers(Number(req.params.id), req.auth!.sub);
+    res.status(200).json({ success: true, data: members, meta: { hiddenCount } });
+  }),
 );
 groupsRouter.post(
   '/:id/mute',

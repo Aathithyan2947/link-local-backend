@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { computeCompletion, type CompletionKey, type ProfileCompletion } from '../../lib/profileCompletion.js';
 import { addressMatches, profileVisibleTo, type VisibilityAddress } from '../../lib/profileVisibility.js';
 import { areaAndCityOnly } from '../../lib/providerLocation.js';
 import { withViewerEventState } from '../../lib/eventTiming.js';
@@ -83,10 +84,12 @@ export async function getMyProfile(userId: number) {
 export async function markOnboardingComplete(userId: number) {
   const profile = await requireProfile(userId);
   if (profile.onboardingCompletedAt) return profile;
-  return prisma.profile.update({
+  const updated = await prisma.profile.update({
     where: { id: profile.id },
     data: { onboardingCompletedAt: new Date() },
   });
+  await recomputeCompletionForUser(userId);
+  return updated;
 }
 
 // ── Service SP rates (per session / monthly / hourly) ────────
@@ -917,58 +920,53 @@ export async function setMyNotificationPrefs(userId: number, input: z.infer<type
 }
 
 // ── Completion tracking ──────────────────────────────────────
-export async function recomputeCompletion(profileId: number) {
-  const profile = await prisma.profile.findUnique({
-    where: { id: profileId },
-    include: {
-      user: { select: { userType: true } },
-      address: { include: { verificationDocs: true } },
-      _count: {
-        select: {
-          educations: true,
-          professions: true,
-          contactDetails: true,
-          serviceTypes: true,
-          products: true,
-          rates: true,
-          paymentMethods: true,
-        },
-      },
-      delivery: true,
-    },
-  });
-  if (!profile) return;
-
-  const isSP = profile.user.userType === 'service_provider';
-  const kind = isSP ? await resolveProviderKind(profileId) : 'service';
-  const isService = kind === 'service';
+/**
+ * Works out the member's "Complete your profile" checklist (lib/profileCompletion.ts) and
+ * stores the percentage, which the admin panel shows. The app reads it live from
+ * GET /profiles/me/completion, so a missed recompute here only delays the admin's copy.
+ */
+export async function recomputeCompletion(profileId: number): Promise<ProfileCompletion | null> {
+  const completion = await computeCompletion(profileId);
+  if (!completion) return null;
+  const done = (key: CompletionKey) => completion.items.some((i) => i.key === key && i.done);
+  // The table's flag columns predate the checklist; the ones with a counterpart are kept in
+  // step (nothing reads them today). Contact, delivery and payment-method flags are left alone.
   const flags = {
-    hasPhoto: !!profile.photoUrl,
-    hasAddress: !!profile.addressId,
-    hasAddressVerified: !!profile.address?.verificationDocs.some((d) => d.status === 'approved'),
-    hasEducation: profile._count.educations > 0,
-    hasProfession: profile._count.professions > 0,
-    hasContactDetails: profile._count.contactDetails > 0,
-    hasServiceTypes: profile._count.serviceTypes > 0,
-    // For a service SP, "catalogue" completion means published rates; delivery prefs don't apply.
-    hasProducts: isService ? profile._count.rates > 0 : profile._count.products > 0,
-    hasDeliveryPrefs: !!profile.delivery,
-    hasPaymentMethods: profile._count.paymentMethods > 0,
+    hasPhoto: done('photo'),
+    hasAddress: done('address'),
+    hasAddressVerified: done('addressProof'),
+    hasEducation: done('education'),
+    hasProfession: done('profession'),
+    hasServiceTypes: done('services'),
+    hasProducts: done('menuItems') || done('charges'),
   };
-
-  const applicable = isSP
-    ? isService
-      ? ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails', 'hasServiceTypes', 'hasProducts', 'hasPaymentMethods']
-      : ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails', 'hasServiceTypes', 'hasProducts', 'hasDeliveryPrefs', 'hasPaymentMethods']
-    : ['hasPhoto', 'hasAddress', 'hasEducation', 'hasProfession', 'hasContactDetails'];
-  const filled = applicable.filter((k) => flags[k as keyof typeof flags]).length;
-  const completionPercent = Math.round((filled / applicable.length) * 100);
-
+  const completionPercent = completion.percent;
   await prisma.profileCompletionTracking.upsert({
     where: { profileId },
     update: { ...flags, completionPercent, lastComputedAt: new Date() },
     create: { profileId, ...flags, completionPercent, lastComputedAt: new Date() },
   });
+  return completion;
+}
 
-  return { ...flags, completionPercent };
+/**
+ * The signed-in member's checklist, fresh (and stored for the admin panel). `profileId` lets
+ * the app open My Profile from a step without waiting on the slower /profiles/me.
+ */
+export async function getMyCompletion(userId: number): Promise<ProfileCompletion & { profileId: number }> {
+  const profile = await requireProfile(userId);
+  return { profileId: profile.id, ...(await recomputeCompletion(profile.id))! };
+}
+
+/**
+ * Recompute after a change made outside this module (address, proof, role, onboarding), so
+ * the admin panel's copy stays current. Bookkeeping: it never fails the request.
+ */
+export async function recomputeCompletionForUser(userId: number): Promise<void> {
+  try {
+    const profile = await prisma.profile.findUnique({ where: { userId }, select: { id: true } });
+    if (profile) await recomputeCompletion(profile.id);
+  } catch {
+    // The live read recomputes anyway.
+  }
 }

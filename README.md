@@ -66,7 +66,7 @@ prisma/
 | Method | Path                          | Auth   | Description |
 |--------|-------------------------------|--------|-------------|
 | POST   | `/auth/register`              | —      | Register (resident/SP) |
-| POST   | `/auth/login`                 | —      | Login (email/mobile + password) |
+| POST   | `/auth/login`                 | —      | Login (email + password; mobile uses OTP) |
 | POST   | `/auth/refresh`               | —      | Refresh access token |
 | GET    | `/auth/me`                    | user   | Current user + profile |
 | POST   | `/auth/admin/login`           | —      | Admin login |

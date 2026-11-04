@@ -33,8 +33,16 @@ export const registerSchema = z
     path: ['email'],
   });
 
+// Email login and password reset are email only (BUG-106): a mobile number signs in with a
+// one-time code instead. The field keeps the name `identifier`, which current app builds send.
+const accountEmail = z
+  .string()
+  .trim()
+  .min(1, 'Enter your email')
+  .email('Enter a valid email address');
+
 export const loginSchema = z.object({
-  identifier: z.string().min(1, 'Email or mobile is required'),
+  identifier: accountEmail,
   // Login only checks presence — the strong-password policy applies at registration.
   password: z.string().min(1, 'Password is required'),
 });
@@ -73,17 +81,11 @@ export const otpVerifySchema = z
   })
   .refine((d) => d.mobile || d.email, { message: 'mobile or email required', path: ['mobile'] });
 
-/** The account a password reset is for: its email or 10-digit mobile number. */
-const resetIdentifier = z
-  .string()
-  .trim()
-  .min(1, 'Enter your email or mobile number')
-  .refine((v) => /^[0-9]{10}$/.test(v) || z.string().email().safeParse(v).success, 'Enter a valid email or 10-digit mobile number');
-
-export const passwordForgotSchema = z.object({ identifier: resetIdentifier });
+/** The account a password reset is for: its email. */
+export const passwordForgotSchema = z.object({ identifier: accountEmail });
 
 export const passwordResetSchema = z.object({
-  identifier: resetIdentifier,
+  identifier: accountEmail,
   otp: z.string().regex(/^[0-9]{6}$/, 'Enter the 6-digit code'),
   newPassword: passwordField,
 });

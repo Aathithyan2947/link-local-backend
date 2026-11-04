@@ -87,11 +87,19 @@ export async function register(input: RegisterInput) {
   return { user, ...issueTokens(payload) };
 }
 
+/** The account with this email, in any letter case. Email login and password reset look
+ *  accounts up by email only (BUG-106); a mobile number signs in with a one-time code.
+ *  An exact match wins: emails are unique only as typed, so two accounts can differ in case. */
+async function findByEmail(email: string) {
+  return (
+    (await prisma.user.findUnique({ where: { email } })) ??
+    prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } }, orderBy: { id: 'asc' } })
+  );
+}
+
 export async function login(input: LoginInput) {
   const { identifier, password } = input;
-  const user = await prisma.user.findFirst({
-    where: { OR: [{ email: identifier }, { mobile: identifier }] },
-  });
+  const user = await findByEmail(identifier);
   if (!user || !user.passwordHash) throw ApiError.unauthorized('Invalid credentials');
   assertAccountEnabled(user);
 
@@ -271,20 +279,13 @@ export async function verifyOtp(input: OtpVerifyInput) {
 // ── Forgot password ──────────────────────────────────────────
 const RESET_CODE_MINUTES = 10;
 
-/** The account a reset is for, by email (any letter case) or mobile number. */
-function findByIdentifier(identifier: string) {
-  return /^[0-9]{10}$/.test(identifier)
-    ? prisma.user.findFirst({ where: { mobile: identifier } })
-    : prisma.user.findFirst({ where: { email: { equals: identifier, mode: 'insensitive' } } });
-}
-
 /**
  * Sends a code for setting a new password (BUG-066). Answers the same whether or not the
  * account exists, so it can't be used to find out who has one. With no SMS or email provider
  * yet, the code comes back as `devOtp` wherever OTPs are exposed (as for sign-in).
  */
 export async function requestPasswordReset(identifier: string) {
-  const user = await findByIdentifier(identifier);
+  const user = await findByEmail(identifier);
   const reply = { sent: true, expiresInSeconds: RESET_CODE_MINUTES * 60 };
   if (!user || !user.isActive || user.isBlocked) return reply;
 
@@ -312,7 +313,7 @@ export async function requestPasswordReset(identifier: string) {
  *  with a one-time code too (they have no password yet), which can then use email login. */
 export async function resetPassword(input: PasswordResetInput) {
   const invalid = () => ApiError.badRequest('Invalid or expired code', { otp: ['Invalid or expired code'] });
-  const user = await findByIdentifier(input.identifier);
+  const user = await findByEmail(input.identifier);
   if (!user) throw invalid();
   const token = await prisma.otpToken.findFirst({
     where: { userId: user.id, purpose: 'password_reset', isUsed: false, expiresAt: { gt: new Date() } },

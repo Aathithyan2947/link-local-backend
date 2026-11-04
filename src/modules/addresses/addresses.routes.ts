@@ -10,7 +10,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { upload } from '../../middleware/upload.js';
 import { uploadBuffer } from '../../lib/cloudinary.js';
 import * as service from './addresses.service.js';
-import { recomputeCompletion } from '../profiles/profiles.service.js';
+import { recomputeCompletion, recomputeCompletionForUser } from '../profiles/profiles.service.js';
 import { writeAudit } from '../admin/audit.js';
 import {
   createAddressSchema,
@@ -68,6 +68,8 @@ addressesRouter.post(
   validate({ body: createAddressSchema }),
   asyncHandler(async (req, res) => {
     const address = await service.createAddressForUser(req.auth!.sub, req.body);
+    // A new address needs its own proof: the checklist drops back.
+    await recomputeCompletionForUser(req.auth!.sub);
     ok(res, address, 201);
   }),
 );
@@ -95,6 +97,7 @@ addressesRouter.post(
       description,
       docUrl: url,
     });
+    await recomputeCompletionForUser(req.auth!.sub);
     ok(res, doc, 201);
   }),
 );

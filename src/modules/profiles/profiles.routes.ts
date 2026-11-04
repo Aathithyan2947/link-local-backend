@@ -40,6 +40,8 @@ export const profilesRouter = Router();
 const auth = authenticate('user');
 
 profilesRouter.get('/me', auth, asyncHandler(async (req, res) => ok(res, await service.getMyProfile(req.auth!.sub))));
+// "Complete your profile": the Profile tab's meter and its checklist, worked out fresh.
+profilesRouter.get('/me/completion', auth, asyncHandler(async (req, res) => ok(res, await service.getMyCompletion(req.auth!.sub))));
 
 // Resident vs Service Provider selection (after address, per PRD).
 profilesRouter.patch(
@@ -52,6 +54,8 @@ profilesRouter.patch(
       data: { userType: req.body.userType },
       select: { id: true, userType: true },
     });
+    // A provider's checklist has more steps than a resident's.
+    await service.recomputeCompletionForUser(req.auth!.sub);
     ok(res, u);
   }),
 );

@@ -628,24 +628,60 @@ export async function listGroupDiscussions(groupId: number, viewerId: number, ar
   );
 }
 
-/** Joined members of a group, for the Members action on the group profile. */
-export async function listGroupMembers(groupId: number) {
-  const rows = await prisma.interestGroupMember.findMany({
-    where: { groupId, status: 'joined' },
-    orderBy: { joinedAt: 'asc' },
-    include: { user: { select: { id: true, profile: { select: { name: true, photoUrl: true } } } } },
-  });
-  const group = await prisma.interestGroup.findUnique({
-    where: { id: groupId },
-    select: { creatorId: true },
-  });
-  return rows.map((m) => ({
+/**
+ * Joined members of a group, for the Members action on the group profile. Like the Members
+ * list (BUG-104), it leaves out anyone whose Profile visibility excludes the viewer and anyone
+ * in a full block with them (either direction); the viewer always sees their own row.
+ * The group's admins see everyone: they run the group, and the admin's exit picks the next
+ * admin from this list (BUG-081), which must not come up empty.
+ * `hiddenCount` is how many joined members were left out, so the count stays honest.
+ */
+export async function listGroupMembers(groupId: number, viewerId: number) {
+  const joined = { groupId, status: 'joined' };
+  const [group, adminRow] = await Promise.all([
+    prisma.interestGroup.findUnique({
+      where: { id: groupId },
+      select: { creatorId: true },
+    }),
+    prisma.interestGroupAdmin.findFirst({ where: { groupId, userId: viewerId }, select: { id: true } }),
+  ]);
+  const seesEveryone = group?.creatorId === viewerId || adminRow !== null;
+  const ctx = seesEveryone ? null : await resolveUserScopeContext(viewerId);
+  const [rows, total] = await Promise.all([
+    prisma.interestGroupMember.findMany({
+      where: ctx
+        ? {
+            ...joined,
+            OR: [
+              { userId: viewerId },
+              {
+                user: {
+                  profile: { is: visibleProfileWhere(ctx) },
+                  blocksInitiated: { none: { blockedId: viewerId, blockScope: 'full' } },
+                  blocksReceived: { none: { blockerId: viewerId, blockScope: 'full' } },
+                },
+              },
+            ],
+          }
+        : joined,
+      orderBy: { joinedAt: 'asc' },
+      include: {
+        user: { select: { id: true, userType: true, profile: { select: { id: true, name: true, photoUrl: true } } } },
+      },
+    }),
+    prisma.interestGroupMember.count({ where: joined }),
+  ]);
+  // profileId + isServiceProvider let a name open the right profile screen.
+  const members = rows.map((m) => ({
     userId: m.user.id,
+    profileId: m.user.profile?.id ?? null,
+    isServiceProvider: m.user.userType === 'service_provider',
     name: m.user.profile?.name ?? 'Member',
     photoUrl: m.user.profile?.photoUrl ?? null,
     isCreator: m.user.id === group?.creatorId,
     joinedAt: m.joinedAt,
   }));
+  return { members, hiddenCount: Math.max(0, total - members.length) };
 }
 
 /** Per-member notification mute for one group. */
