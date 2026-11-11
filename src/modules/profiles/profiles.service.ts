@@ -11,6 +11,7 @@ import { getCustomFieldsForProfile } from '../../lib/customFields.js';
 import { advancePercentError, isAdvancePercentField } from '../../lib/advancePayment.js';
 import { isTravelDistanceField, travelDistanceError } from './profiles.schema.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
+import { creditReferralOnRegistration } from '../referrals/referrals.service.js';
 import type { z } from 'zod';
 import type {
   aboutSchema,
@@ -236,20 +237,51 @@ export async function updateProfile(userId: number, data: z.infer<typeof updateP
   return updated;
 }
 
-/** Records how the member found us + who referred them (captured at address verification). */
+/**
+ * Records how the member found us + who referred them (captured at the "Verify your Address"
+ * sign-up step, where the app asks for the code). A code given here earns the referrer the same
+ * points as one given at registration (BUG-120), so the referrer can be set once only: sending
+ * the same code again is a no-op, a different one is refused.
+ */
 export async function setReferral(userId: number, input: { referralCode?: string; referralSourceId?: number }) {
-  const data: { referredBy?: number; referralSourceId?: number } = {};
   const code = input.referralCode?.trim();
+  let referrerId: number | undefined;
   if (code) {
     const referrer = await prisma.user.findUnique({ where: { referralCode: code } });
     if (!referrer) throw ApiError.badRequest("That referral code isn't valid. Check the member ID and try again.");
     if (referrer.id === userId) throw ApiError.badRequest("You can't use your own referral code.");
-    data.referredBy = referrer.id;
+    if (referrer.referredBy === userId) {
+      throw ApiError.badRequest("You can't use the code of someone you referred.");
+    }
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { referredBy: true } });
+    if (me.referredBy != null && me.referredBy !== referrer.id) {
+      throw ApiError.badRequest("You've already added a referral code.");
+    }
+    referrerId = referrer.id;
   }
-  if (input.referralSourceId != null) data.referralSourceId = input.referralSourceId;
-  if (Object.keys(data).length === 0) return { updated: false };
-  await prisma.user.update({ where: { id: userId }, data });
-  return { updated: true };
+
+  if (input.referralSourceId != null) {
+    await prisma.user.update({ where: { id: userId }, data: { referralSourceId: input.referralSourceId } });
+  }
+
+  if (referrerId != null) {
+    // Set the referrer only while none is set, in one statement, so a double tap or a retry
+    // credits the points once.
+    const claimed = await prisma.user.updateMany({
+      where: { id: userId, referredBy: null },
+      data: { referredBy: referrerId },
+    });
+    if (claimed.count === 1) {
+      const me = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { mobile: true } });
+      await creditReferralOnRegistration(referrerId, { id: userId, mobile: me.mobile });
+    } else {
+      // Lost a race to a request with a different code.
+      const me = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { referredBy: true } });
+      if (me.referredBy !== referrerId) throw ApiError.badRequest("You've already added a referral code.");
+    }
+  }
+
+  return { updated: referrerId != null || input.referralSourceId != null };
 }
 
 export async function setPhoto(userId: number, photoUrl: string) {
